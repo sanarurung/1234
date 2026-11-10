@@ -1,5 +1,5 @@
 use serde::Serialize;
-use std::io::{self, BufRead};
+use std::io::{self, BufRead, Write};
 use windows_sys::Win32::Devices::DeviceAndDriverInstallation::{
     SetupDiDestroyDeviceInfoList, SetupDiEnumDeviceInfo, SetupDiGetClassDevsW,
     SetupDiGetDeviceRegistryPropertyW, SP_DEVINFO_DATA, DIGCF_ALLCLASSES, DIGCF_PRESENT,
