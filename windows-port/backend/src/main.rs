@@ -690,6 +690,40 @@ fn dpapi_protect(_input: &[u8]) -> Result<Vec<u8>, String> {
     Err("Pairing records can only be protected with Windows DPAPI on Windows.".into())
 }
 
+
+#[cfg(windows)]
+fn dpapi_unprotect(input: &[u8]) -> Result<Vec<u8>, String> {
+    use std::ffi::c_void;
+    #[repr(C)]
+    struct DataBlob { cb_data: u32, pb_data: *mut u8 }
+    #[link(name = "Crypt32")]
+    unsafe extern "system" {
+        fn CryptUnprotectData(data_in: *const DataBlob, description: *mut *mut u16, optional_entropy: *const DataBlob,
+            reserved: *mut c_void, prompt: *mut c_void, flags: u32, data_out: *mut DataBlob) -> i32;
+    }
+    #[link(name = "Kernel32")]
+    unsafe extern "system" { fn LocalFree(memory: *mut c_void) -> *mut c_void; }
+
+    if input.len() > u32::MAX as usize {
+        return Err("DPAPI input exceeds the Windows DATA_BLOB size limit".into());
+    }
+    let mut source = input.to_vec();
+    let input_blob = DataBlob { cb_data: source.len() as u32, pb_data: source.as_mut_ptr() };
+    let mut output_blob = DataBlob { cb_data: 0, pb_data: std::ptr::null_mut() };
+    let ok = unsafe { CryptUnprotectData(&input_blob, std::ptr::null_mut(), std::ptr::null(), std::ptr::null_mut(), std::ptr::null_mut(), 1, &mut output_blob) };
+    if ok == 0 {
+        return Err(format!("Windows DPAPI CryptUnprotectData failed: {}", std::io::Error::last_os_error()));
+    }
+    let clear = unsafe { std::slice::from_raw_parts(output_blob.pb_data, output_blob.cb_data as usize).to_vec() };
+    unsafe { LocalFree(output_blob.pb_data as *mut c_void); }
+    Ok(clear)
+}
+
+#[cfg(not(windows))]
+fn dpapi_unprotect(_input: &[u8]) -> Result<Vec<u8>, String> {
+    Err("Pairing records can only be unprotected with Windows DPAPI on Windows.".into())
+}
+
 fn prepare_pairing_materials() -> Result<PairingMaterialResult, String> {
     use openssl::asn1::{Asn1Integer, Asn1Time};
     use openssl::bn::BigNum;
@@ -754,6 +788,90 @@ fn prepare_pairing_materials() -> Result<PairingMaterialResult, String> {
         }
     };
 
+    // Use a versioned path so the first corrected record never overwrites the earlier
+    // preflight artifact. Existing v2 records are decrypted and fully checked before reuse.
+    let base = std::env::var("LOCALAPPDATA").map_err(|_| "LOCALAPPDATA is not available".to_string())?;
+    let dir = std::path::PathBuf::from(base).join("DiPlay").join("Pairing");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("Cannot create protected pairing directory: {e}"))?;
+    let path = dir.join(format!("{udid}.pairrecord.v2.dpapi"));
+
+    if path.exists() {
+        use openssl::pkey::PKey;
+        use openssl::x509::X509;
+        let protected = std::fs::read(&path).map_err(|e| format!("Cannot read existing protected PairRecord: {e}"))?;
+        let clear = dpapi_unprotect(&protected)?;
+        let value: plist::Value = plist::from_reader(std::io::Cursor::new(clear))
+            .map_err(|e| format!("Existing PairRecord plist is invalid: {e}"))?;
+        let dict = value.as_dictionary().ok_or("Existing PairRecord is not a plist dictionary")?;
+        let get_data = |key: &str| -> Result<Vec<u8>, String> {
+            dict.get(key).and_then(|v| v.as_data()).map(|v| v.to_vec())
+                .ok_or_else(|| format!("Existing PairRecord is missing binary field {key}"))
+        };
+        let get_string = |key: &str| -> Result<String, String> {
+            dict.get(key).and_then(|v| v.as_string()).map(str::to_owned)
+                .ok_or_else(|| format!("Existing PairRecord is missing string field {key}"))
+        };
+
+        let saved_udid = get_string("UniqueDeviceID")?;
+        if saved_udid != udid {
+            return Err("Existing PairRecord UDID does not match the connected iPhone; refusing to reuse it".into());
+        }
+        let saved_device_key = get_data("DevicePublicKey")?;
+        if saved_device_key != device_public_key_pem {
+            return Err("The connected iPhone DevicePublicKey differs from the saved PairRecord; refusing unsafe reuse".into());
+        }
+
+        let root_pem = get_data("RootCertificate")?;
+        let host_pem = get_data("HostCertificate")?;
+        let device_pem = get_data("DeviceCertificate")?;
+        let root_key_pem = get_data("RootPrivateKey")?;
+        let host_key_pem = get_data("HostPrivateKey")?;
+        let root_cert = X509::from_pem(&root_pem).map_err(|e| format!("Saved RootCertificate is invalid: {e}"))?;
+        let host_cert = X509::from_pem(&host_pem).map_err(|e| format!("Saved HostCertificate is invalid: {e}"))?;
+        let device_cert = X509::from_pem(&device_pem).map_err(|e| format!("Saved DeviceCertificate is invalid: {e}"))?;
+        let root_key = PKey::private_key_from_pem(&root_key_pem).map_err(|e| format!("Saved RootPrivateKey is invalid: {e}"))?;
+        let host_key = PKey::private_key_from_pem(&host_key_pem).map_err(|e| format!("Saved HostPrivateKey is invalid: {e}"))?;
+        let root_public_key = root_cert.public_key().map_err(|e| e.to_string())?;
+        let host_public_key = host_cert.public_key().map_err(|e| e.to_string())?;
+        let device_cert_public_key = device_cert.public_key().map_err(|e| e.to_string())?;
+
+        if !root_cert.verify(&root_public_key).map_err(|e| format!("Root certificate signature check failed: {e}"))? {
+            return Err("Saved RootCertificate is not self-signed by its own public key".into());
+        }
+        if !host_cert.verify(&root_public_key).map_err(|e| format!("Host certificate signature check failed: {e}"))? {
+            return Err("Saved HostCertificate is not signed by the saved root".into());
+        }
+        if !device_cert.verify(&root_public_key).map_err(|e| format!("Device certificate signature check failed: {e}"))? {
+            return Err("Saved DeviceCertificate is not signed by the saved root".into());
+        }
+        if !root_public_key.public_eq(&root_key) || !host_public_key.public_eq(&host_key) {
+            return Err("Saved certificate public keys do not match their private keys".into());
+        }
+        if !device_cert_public_key.public_eq(&device_public_key) {
+            return Err("Saved DeviceCertificate does not contain the connected iPhone public key".into());
+        }
+        for (label, cert) in [("Root", &root_cert), ("Host", &host_cert), ("Device", &device_cert)] {
+            let serial = cert.serial_number().to_bn().map_err(|e| format!("{label} certificate serial is invalid: {e}"))?;
+            if serial.num_bits() == 0 {
+                return Err(format!("Saved {label} certificate has a non-positive serial number; refusing reuse"));
+            }
+        }
+
+        let host_id = get_string("HostID")?;
+        let system_buid = get_string("SystemBUID")?;
+        return Ok(PairingMaterialResult {
+            prepared: true,
+            device_id,
+            unique_device_id: udid,
+            host_id,
+            system_buid,
+            root_certificate_bytes: root_pem.len(),
+            host_certificate_bytes: host_pem.len(),
+            device_certificate_bytes: device_pem.len(),
+            protected_record_path: path.display().to_string(),
+        });
+    }
+
     let rsa_root = Rsa::generate(2048).map_err(|e| format!("RSA root key generation failed: {e}"))?;
     let root_key: PKey<Private> = PKey::from_rsa(rsa_root).map_err(|e| format!("Root key conversion failed: {e}"))?;
     let rsa_host = Rsa::generate(2048).map_err(|e| format!("RSA host key generation failed: {e}"))?;
@@ -803,7 +921,7 @@ fn prepare_pairing_materials() -> Result<PairingMaterialResult, String> {
     let device_name = device_name_builder.build();
     let mut device_builder = X509::builder().map_err(|e| e.to_string())?;
     device_builder.set_version(2).map_err(|e| e.to_string())?;
-    let device_serial_bn = BigNum::from_u32(0).map_err(|e| e.to_string())?;
+    let device_serial_bn = BigNum::from_u32(3).map_err(|e| e.to_string())?;
     let device_serial = Asn1Integer::from_bn(&device_serial_bn).map_err(|e| e.to_string())?;
     device_builder.set_serial_number(&device_serial).map_err(|e| e.to_string())?;
     device_builder.set_subject_name(&device_name).map_err(|e| e.to_string())?;
@@ -838,10 +956,6 @@ fn prepare_pairing_materials() -> Result<PairingMaterialResult, String> {
     plist::to_writer_binary(&mut serialized, &plist::Value::Dictionary(record))
         .map_err(|e| format!("PairRecord serialization failed: {e}"))?;
     let protected = dpapi_protect(&serialized)?;
-    let base = std::env::var("LOCALAPPDATA").map_err(|_| "LOCALAPPDATA is not available".to_string())?;
-    let dir = std::path::PathBuf::from(base).join("DiPlay").join("Pairing");
-    std::fs::create_dir_all(&dir).map_err(|e| format!("Cannot create protected pairing directory: {e}"))?;
-    let path = dir.join(format!("{udid}.pairrecord.dpapi"));
     std::fs::write(&path, protected).map_err(|e| format!("Cannot save DPAPI-protected PairRecord: {e}"))?;
 
     Ok(PairingMaterialResult {
