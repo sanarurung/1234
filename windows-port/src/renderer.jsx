@@ -13,6 +13,8 @@ function App() {
   const [probingMux, setProbingMux] = useState(false);
   const [lockdownResult, setLockdownResult] = useState(null);
   const [queryingLockdown, setQueryingLockdown] = useState(false);
+  const [pairingMaterial, setPairingMaterial] = useState(null);
+  const [preparingPairing, setPreparingPairing] = useState(false);
   const [pairingPreflight, setPairingPreflight] = useState(null);
   const [checkingPairing, setCheckingPairing] = useState(false);
 
@@ -74,6 +76,21 @@ function App() {
       setError(err.message || String(err));
     } finally {
       setCheckingPairing(false);
+    }
+  };
+
+
+  const preparePairing = async () => {
+    setPreparingPairing(true);
+    setError("");
+    try {
+      const result = await window.diPlay.preparePairing();
+      if (result.status !== "ok") throw new Error(result.message || "Pairing 인증서 생성에 실패했습니다.");
+      setPairingMaterial(result.devices);
+    } catch (err) {
+      setError(err.message || String(err));
+    } finally {
+      setPreparingPairing(false);
     }
   };
 
@@ -139,6 +156,22 @@ function App() {
         <span>DeviceID: {pairingPreflight.device_id} · DevicePublicKey: {pairingPreflight.device_public_key_bytes ?? 0} bytes</span>
         <small>UDID: {pairingPreflight.unique_device_id || "응답 없음"}</small>
       </div></article>
+    </section>}
+
+    <section className="panel scan-panel">
+      <div><div className="panel-label">PAIRING MATERIAL GENERATION</div><div className="state">iPhone 공개 키 기반 인증서 생성 · Windows DPAPI 보호 저장</div></div>
+      <button className="scan-button" onClick={preparePairing} disabled={preparingPairing || status?.backend !== "ready"}>{preparingPairing ? "인증서 생성 중..." : "Pairing 인증서 준비"}</button>
+    </section>
+    {pairingMaterial && <section className="results">
+      <div className="results-heading"><h2>Pairing 인증서 준비 결과</h2><span>{pairingMaterial.prepared ? "준비 완료" : "실패"}</span></div>
+      <article className="device"><div className="device-info">
+        <strong>DeviceID: {pairingMaterial.device_id} · {pairingMaterial.unique_device_id}</strong>
+        <span>Root: {pairingMaterial.root_certificate_bytes} bytes · Host: {pairingMaterial.host_certificate_bytes} bytes · Device: {pairingMaterial.device_certificate_bytes} bytes</span>
+        <small>HostID: {pairingMaterial.host_id}</small>
+        <small>SystemBUID: {pairingMaterial.system_buid}</small>
+        <small>보호 저장 위치: {pairingMaterial.protected_record_path}</small>
+      </div></article>
+      <p>현재는 인증서 생성 및 DPAPI 보호 저장까지만 수행했습니다. iPhone에 Pair 요청은 아직 전송하지 않았습니다.</p>
     </section>}
     {lockdownResult && <section className="results">
       <div className="results-heading"><h2>Lockdown 연결 결과</h2><span>{lockdownResult.connected ? "연결 성공" : "연결 실패"}</span></div>
