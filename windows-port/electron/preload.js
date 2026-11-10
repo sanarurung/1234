@@ -9,5 +9,6 @@ contextBridge.exposeInMainWorld("diPlay", {
   preparePairing: () => ipcRenderer.invoke("pairing:prepare"),
   requestPairing: () => ipcRenderer.invoke("pairing:pair"),
   validatePairing: () => ipcRenderer.invoke("pairing:validate"),
+  startLockdownSession: () => ipcRenderer.invoke("lockdown:start-session"),
   pairingPreflight: () => ipcRenderer.invoke("lockdown:pairing-preflight")
 });
