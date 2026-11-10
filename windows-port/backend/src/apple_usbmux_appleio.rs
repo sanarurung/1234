@@ -227,10 +227,10 @@ mod platform {
 
             let result = (|| {
                 // Apple requires this 0x24-byte initialization IOCTL before any pipe operation.
-                let init = [0u8; 0x24];
-                unsafe {
+                let mut init = [0u8; 0x24];
+                let init_n = unsafe {
                     ioctl(handle, IOCTL_INIT, init.as_ptr() as *const c_void, init.len() as u32,
-                        init.as_ptr() as *mut c_void, init.len() as u32)
+                        init.as_mut_ptr() as *mut c_void, init.len() as u32)
                 }.map_err(|e| format!("Apple MUX INIT (0x2200A8) failed: {e}"))?;
 
                 let mut serial_buf = [0u8; 0x100];
@@ -304,7 +304,10 @@ mod platform {
 
                     let remaining = deadline.saturating_duration_since(std::time::Instant::now());
                     if remaining.is_zero() {
-                        return Err(format!("Timed out waiting for USBMUX VERSION reply after {HANDSHAKE_TIMEOUT_MS} ms; buffered={} bytes", buffered.len()));
+                        return Err(format!(
+                            "Timed out waiting for USBMUX VERSION reply after {HANDSHAKE_TIMEOUT_MS} ms; buffered={} bytes; INIT returned {init_n}/{} bytes; serial={serial}; pipe1=0x{ep1:02X}/max{mp1}; pipe2=0x{ep2:02X}/max{mp2}; read_pipe={read_pipe} read_ioctl=0x{read_code:08X} read_endpoint=0x{ep_read:02X}; write_pipe={write_pipe} write_ioctl=0x{write_code:08X} write_endpoint=0x{ep_write:02X}; VERSION OUT={written}/{write_len} bytes",
+                            buffered.len(), init.len()
+                        ));
                     }
                     let mut chunk = vec![0u8; MAX_REPLY];
                     let n = match unsafe {
