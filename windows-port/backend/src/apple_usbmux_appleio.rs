@@ -235,27 +235,13 @@ mod platform {
                 version_request[4..8].copy_from_slice(&(USBMUX_VERSION_REQUEST_SIZE as u32).to_be_bytes());
                 version_request[8..12].copy_from_slice(&2u32.to_be_bytes());
 
-                let write_code = pipe_ioctl_write(write_pipe);
-                // AppleUsbFilter's METHOD_IN_DIRECT pipe IOCTL expects the transfer
-                // bytes in the output/MDL buffer too. netmuxd passes the same buffer
-                // for input and output; a separate zeroed output buffer silently
-                // sends zero bytes instead of the USBMUX frame.
-                let mut write_buffer = version_request;
-                let write_len = write_buffer.len() as u32;
-                let write_ptr = write_buffer.as_mut_ptr();
-                let written = unsafe {
-                    ioctl(handle, write_code, write_ptr as *const c_void, write_len,
-                        write_ptr as *mut c_void, write_len)
-                }.map_err(|e| format!("Apple MUX bulk write (pipe {write_pipe}, IOCTL 0x{write_code:08X}) failed: {e}"))?;
-                if written != write_len {
-                    return Err(format!("USBMUX VERSION request short write: {written}/{write_len}"));
-                }
-
                 let read_code = pipe_ioctl_read(read_pipe);
-                // Arm the IN transfer before sending VERSION. The reference
-                // Apple mux backend keeps its reader active concurrently with
-                // the first write; posting the read first avoids relying on
-                // the device/driver to buffer an early response.
+                let write_code = pipe_ioctl_write(write_pipe);
+                let ep_read = if read_pipe == 1 { ep1 } else { ep2 };
+                let ep_write = if write_pipe == 1 { ep1 } else { ep2 };
+
+                // Post the bulk-IN request before sending VERSION. Both
+                // Apple pipe IOCTLs use the same buffer for input and output.
                 let read_handle = handle as usize;
                 let read_task = std::thread::scope(|scope| {
                     let pending_read = scope.spawn(|| {
@@ -268,25 +254,25 @@ mod platform {
                         reply.truncate(n);
                         Ok::<Vec<u8>, String>(reply)
                     });
-                    let write_result = (|| {
-                        let write_code = pipe_ioctl_write(write_pipe);
-                        let mut write_buffer = version_request;
-                        let write_len = write_buffer.len() as u32;
-                        let write_ptr = write_buffer.as_mut_ptr();
-                        let written = unsafe {
-                            ioctl(handle, write_code, write_ptr as *const c_void, write_len,
-                                write_ptr as *mut c_void, write_len)
-                        }.map_err(|e| format!("Apple MUX bulk write (pipe {write_pipe}, endpoint 0x{ep_write:02X}, IOCTL 0x{write_code:08X}) failed: {e}"))?;
-                        if written != write_len {
-                            return Err(format!("USBMUX VERSION request short write: {written}/{write_len}"));
-                        }
-                        Ok::<(), String>(())
-                    })();
+
+                    let mut write_buffer = version_request;
+                    let write_len = write_buffer.len() as u32;
+                    let write_ptr = write_buffer.as_mut_ptr();
+                    let write_result = unsafe {
+                        ioctl(handle, write_code, write_ptr as *const c_void, write_len,
+                            write_ptr as *mut c_void, write_len)
+                    }.map_err(|e| format!("Apple MUX bulk write (pipe {write_pipe}, endpoint 0x{ep_write:02X}, IOCTL 0x{write_code:08X}) failed: {e}"))
+                      .and_then(|written| {
+                          if written == write_len { Ok(()) }
+                          else { Err(format!("USBMUX VERSION request short write: {written}/{write_len}")) }
+                      });
+
                     let read_result = pending_read.join()
                         .map_err(|_| "Apple MUX reader thread panicked".to_string())?;
                     write_result?;
                     read_result
                 })?;
+                let mut reply = read_task;
                 let read = read_task.len();
                 let mut reply = read_task;
                 if read < 20 { return Err(format!("USBMUX VERSION reply too short: {read} bytes ({})", hex(&reply[..read]))); }
