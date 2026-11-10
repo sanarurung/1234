@@ -4,7 +4,7 @@ use windows_sys::Win32::Devices::DeviceAndDriverInstallation::{
     SetupDiDestroyDeviceInfoList, SetupDiEnumDeviceInfo, SetupDiGetClassDevsW,
     SetupDiGetDeviceRegistryPropertyW, SP_DEVINFO_DATA, DIGCF_ALLCLASSES, DIGCF_PRESENT,
 };
-use windows_sys::Win32::Foundation::{GetLastError, ERROR_NO_MORE_ITEMS, INVALID_HANDLE_VALUE};
+use windows_sys::Win32::Foundation::{GetLastError, ERROR_NO_MORE_ITEMS};
 
 #[derive(Serialize)]
 struct Device {
@@ -79,7 +79,9 @@ fn enumerate_usb() -> Result<Vec<Device>, String> {
             DIGCF_ALLCLASSES | DIGCF_PRESENT,
         )
     };
-    if set == INVALID_HANDLE_VALUE {
+
+    // HDEVINFO is an isize in windows-sys 0.59; INVALID_HANDLE_VALUE is -1.
+    if set == -1isize {
         return Err(format!("SetupDiGetClassDevsW failed: {}", unsafe { GetLastError() }));
     }
 
