@@ -4,6 +4,9 @@ use serde::Serialize;
 pub struct AppleIoUsbMuxResult {
     pub interface_path: String,
     pub device_serial: String,
+    pub init_response_hex: String,
+    pub pipe_1_properties_hex: String,
+    pub pipe_2_properties_hex: String,
     pub pipe_1_endpoint: String,
     pub pipe_1_max_packet: u16,
     pub pipe_2_endpoint: String,
@@ -200,7 +203,7 @@ mod platform {
         IOCTL_WRITE_PIPE_BASE | (((pipe as u32) << 2) + 0x40) | 1
     }
 
-    fn pipe_properties(handle: HANDLE, index: u32) -> Result<(u8, u16), String> {
+    fn pipe_properties(handle: HANDLE, index: u32) -> Result<(u8, u16, String), String> {
         let mut buffer = [0u8; 0x18];
         buffer[..4].copy_from_slice(&index.to_le_bytes());
         let n = unsafe {
@@ -208,7 +211,7 @@ mod platform {
         }.map_err(|e| format!("Apple MUX GET_PIPE_PROPERTIES(index={index}) failed: {e}"))?;
         if n < 7 { return Err(format!("GET_PIPE_PROPERTIES returned only {n} bytes for pipe {index}")); }
         let packet = u16::from_le_bytes([buffer[4], buffer[5]]);
-        Ok((buffer[6], packet))
+        Ok((buffer[6], packet, hex(&buffer)))
     }
 
     pub fn handshake() -> Result<AppleIoUsbMuxResult, String> {
@@ -243,8 +246,8 @@ mod platform {
                 let serial = String::from_utf8_lossy(&serial_buf[..serial_end]).into_owned();
                 if serial.is_empty() { return Err("Apple MUX returned an empty UDID".into()); }
 
-                let (ep1, mp1) = pipe_properties(handle, 1)?;
-                let (ep2, mp2) = pipe_properties(handle, 2)?;
+                let (ep1, mp1, pipe1_raw) = pipe_properties(handle, 1)?;
+                let (ep2, mp2, pipe2_raw) = pipe_properties(handle, 2)?;
                 let (read_pipe, write_pipe, write_packet) = match (ep1 & 0x80 != 0, ep2 & 0x80 != 0) {
                     (true, false) => (1u8, 2u8, mp2),
                     (false, true) => (2u8, 1u8, mp1),
@@ -305,8 +308,8 @@ mod platform {
                     let remaining = deadline.saturating_duration_since(std::time::Instant::now());
                     if remaining.is_zero() {
                         return Err(format!(
-                            "Timed out waiting for USBMUX VERSION reply after {HANDSHAKE_TIMEOUT_MS} ms; buffered={} bytes; INIT returned {init_n}/{} bytes; serial={serial}; pipe1=0x{ep1:02X}/max{mp1}; pipe2=0x{ep2:02X}/max{mp2}; read_pipe={read_pipe} read_ioctl=0x{read_code:08X} read_endpoint=0x{ep_read:02X}; write_pipe={write_pipe} write_ioctl=0x{write_code:08X} write_endpoint=0x{ep_write:02X}; VERSION OUT={written}/{write_len} bytes",
-                            buffered.len(), init.len()
+                            "Timed out waiting for USBMUX VERSION reply after {HANDSHAKE_TIMEOUT_MS} ms; buffered={} bytes; INIT returned {init_n}/{} bytes data={}; serial={serial}; pipe1=0x{ep1:02X}/max{mp1} raw={pipe1_raw}; pipe2=0x{ep2:02X}/max{mp2} raw={pipe2_raw}; read_pipe={read_pipe} read_ioctl=0x{read_code:08X} read_endpoint=0x{ep_read:02X}; write_pipe={write_pipe} write_ioctl=0x{write_code:08X} write_endpoint=0x{ep_write:02X}; VERSION OUT={written}/{write_len} bytes",
+                            buffered.len(), init.len(), hex(&init)
                         ));
                     }
                     let mut chunk = vec![0u8; MAX_REPLY];
@@ -330,6 +333,9 @@ mod platform {
                 Ok(AppleIoUsbMuxResult {
                     interface_path: path.clone(),
                     device_serial: serial,
+                    init_response_hex: hex(&init),
+                    pipe_1_properties_hex: pipe1_raw,
+                    pipe_2_properties_hex: pipe2_raw,
                     pipe_1_endpoint: format!("0x{ep1:02X}"),
                     pipe_1_max_packet: mp1,
                     pipe_2_endpoint: format!("0x{ep2:02X}"),
