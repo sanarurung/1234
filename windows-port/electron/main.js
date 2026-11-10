@@ -83,6 +83,7 @@ ipcMain.handle("app:get-status", async () => ({
 }));
 ipcMain.handle("usb:list", async () => sendBackendCommand("usb:list"));
 ipcMain.handle("usb:inspect", async () => sendBackendCommand("usb:inspect"));
+ipcMain.handle("usbmux:probe", async () => sendBackendCommand("usbmux:probe"));
 
 app.whenReady().then(() => {
   startBackend();
