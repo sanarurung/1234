@@ -691,13 +691,19 @@ fn dpapi_protect(_input: &[u8]) -> Result<Vec<u8>, String> {
 }
 
 fn prepare_pairing_materials() -> Result<PairingMaterialResult, String> {
-    use rcgen::{BasicConstraints, CertificateParams, DistinguishedName, DnType, ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose, SubjectPublicKeyInfo};
+    use openssl::asn1::Asn1Time;
+    use openssl::hash::MessageDigest;
+    use openssl::pkey::{PKey, Private};
+    use openssl::rsa::Rsa;
+    use openssl::x509::extension::{BasicConstraints, KeyUsage, SubjectKeyIdentifier};
+    use openssl::x509::{X509NameBuilder, X509};
     use std::net::{SocketAddr, TcpStream};
     use std::time::Duration;
     use uuid::Uuid;
 
     let address: SocketAddr = "127.0.0.1:27015".parse().unwrap();
-    let mut mux = TcpStream::connect_timeout(&address, Duration::from_secs(3)).map_err(|e| format!("Apple USBMUX connect failed: {e}"))?;
+    let mut mux = TcpStream::connect_timeout(&address, Duration::from_secs(3))
+        .map_err(|e| format!("Apple USBMUX connect failed: {e}"))?;
     mux.set_read_timeout(Some(Duration::from_secs(5))).map_err(|e| e.to_string())?;
     mux.set_write_timeout(Some(Duration::from_secs(5))).map_err(|e| e.to_string())?;
     write_usbmux_plist(&mut mux, 1, make_usbmux_message("ListDevices"))?;
@@ -714,7 +720,8 @@ fn prepare_pairing_materials() -> Result<PairingMaterialResult, String> {
     let udid = props.get("SerialNumber").and_then(|v| v.as_string()).ok_or("USB device has no SerialNumber/UDID")?.to_string();
     drop(mux);
 
-    let mut mux = TcpStream::connect_timeout(&address, Duration::from_secs(3)).map_err(|e| format!("Apple USBMUX reconnect failed: {e}"))?;
+    let mut mux = TcpStream::connect_timeout(&address, Duration::from_secs(3))
+        .map_err(|e| format!("Apple USBMUX reconnect failed: {e}"))?;
     mux.set_read_timeout(Some(Duration::from_secs(8))).map_err(|e| e.to_string())?;
     mux.set_write_timeout(Some(Duration::from_secs(5))).map_err(|e| e.to_string())?;
     let mut connect = make_usbmux_message("Connect");
@@ -735,47 +742,78 @@ fn prepare_pairing_materials() -> Result<PairingMaterialResult, String> {
         return Err(format!("Unexpected Lockdown service response: {query_result:?}"));
     }
     let device_public_key_value = lockdown_get_value(&mut mux, "DevicePublicKey")?;
-    let device_public_key_der = device_public_key_value.as_data().ok_or("DevicePublicKey is not plist data")?;
-    let device_public_key = SubjectPublicKeyInfo::from_der(device_public_key_der)
-        .map_err(|e| format!("iPhone DevicePublicKey is not a supported DER SubjectPublicKeyInfo: {e}"))?;
+    let device_public_key_pem = device_public_key_value.as_data().ok_or("DevicePublicKey is not plist data")?;
+    // lockdownd exposes DevicePublicKey as PEM (libimobiledevice parses it with PEM_read_bio_PUBKEY).
+    let device_public_key = PKey::public_key_from_pem(device_public_key_pem)
+        .map_err(|e| format!("Cannot parse iPhone DevicePublicKey PEM: {e}"))?;
 
-    // Generate a fresh host CA and host identity. The iPhone public key is used as
-    // the subject key of DeviceCertificate; its private key is never requested.
-    let root_key = KeyPair::generate().map_err(|e| format!("Root key generation failed: {e}"))?;
-    let host_key = KeyPair::generate().map_err(|e| format!("Host key generation failed: {e}"))?;
+    let rsa_root = Rsa::generate(2048).map_err(|e| format!("RSA root key generation failed: {e}"))?;
+    let root_key: PKey<Private> = PKey::from_rsa(rsa_root).map_err(|e| format!("Root key conversion failed: {e}"))?;
+    let rsa_host = Rsa::generate(2048).map_err(|e| format!("RSA host key generation failed: {e}"))?;
+    let host_key: PKey<Private> = PKey::from_rsa(rsa_host).map_err(|e| format!("Host key conversion failed: {e}"))?;
 
-    let mut root_params = CertificateParams::default();
-    let mut root_dn = DistinguishedName::new();
-    root_dn.push(DnType::CommonName, "DiPlay Windows Pairing Root");
-    root_params.distinguished_name = root_dn;
-    root_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
-    root_params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
-    let root_cert = root_params.self_signed(&root_key).map_err(|e| format!("Root certificate generation failed: {e}"))?;
+    let now = Asn1Time::days_from_now(0).map_err(|e| e.to_string())?;
+    let expiry = Asn1Time::days_from_now(3650).map_err(|e| e.to_string())?;
 
-    let mut host_params = CertificateParams::default();
-    let mut host_dn = DistinguishedName::new();
-    host_dn.push(DnType::CommonName, "DiPlay Windows Host");
-    host_params.distinguished_name = host_dn;
-    host_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
-    let host_cert = host_params.signed_by(&host_key, &root_cert, &root_key)
-        .map_err(|e| format!("Host certificate generation failed: {e}"))?;
+    let mut root_name_builder = X509NameBuilder::new().map_err(|e| e.to_string())?;
+    root_name_builder.append_entry_by_text("CN", "DiPlay Windows Pairing Root").map_err(|e| e.to_string())?;
+    let root_name = root_name_builder.build();
+    let mut root_builder = X509::builder().map_err(|e| e.to_string())?;
+    root_builder.set_version(2).map_err(|e| e.to_string())?;
+    root_builder.set_subject_name(&root_name).map_err(|e| e.to_string())?;
+    root_builder.set_issuer_name(&root_name).map_err(|e| e.to_string())?;
+    root_builder.set_pubkey(&root_key).map_err(|e| e.to_string())?;
+    root_builder.set_not_before(&now).map_err(|e| e.to_string())?;
+    root_builder.set_not_after(&expiry).map_err(|e| e.to_string())?;
+    root_builder.append_extension(BasicConstraints::new().critical().ca().build().map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+    root_builder.append_extension(KeyUsage::new().critical().key_cert_sign().crl_sign().build().map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+    root_builder.sign(&root_key, MessageDigest::sha256()).map_err(|e| e.to_string())?;
+    let root_cert = root_builder.build();
 
-    let mut device_params = CertificateParams::default();
-    let mut device_dn = DistinguishedName::new();
-    device_dn.push(DnType::CommonName, format!("iPhone {udid}"));
-    device_params.distinguished_name = device_dn;
-    let device_cert = device_params.signed_by(&device_public_key, &root_cert, &root_key)
-        .map_err(|e| format!("Device certificate generation failed: {e}"))?;
+    let mut host_name_builder = X509NameBuilder::new().map_err(|e| e.to_string())?;
+    host_name_builder.append_entry_by_text("CN", "DiPlay Windows Host").map_err(|e| e.to_string())?;
+    let host_name = host_name_builder.build();
+    let mut host_builder = X509::builder().map_err(|e| e.to_string())?;
+    host_builder.set_version(2).map_err(|e| e.to_string())?;
+    host_builder.set_subject_name(&host_name).map_err(|e| e.to_string())?;
+    host_builder.set_issuer_name(root_cert.subject_name()).map_err(|e| e.to_string())?;
+    host_builder.set_pubkey(&host_key).map_err(|e| e.to_string())?;
+    host_builder.set_not_before(&now).map_err(|e| e.to_string())?;
+    host_builder.set_not_after(&expiry).map_err(|e| e.to_string())?;
+    host_builder.append_extension(BasicConstraints::new().critical().build().map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+    host_builder.append_extension(KeyUsage::new().critical().digital_signature().key_encipherment().build().map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+    host_builder.sign(&root_key, MessageDigest::sha256()).map_err(|e| e.to_string())?;
+    let host_cert = host_builder.build();
+
+    let mut device_name_builder = X509NameBuilder::new().map_err(|e| e.to_string())?;
+    device_name_builder.append_entry_by_text("CN", "iPhone Device").map_err(|e| e.to_string())?;
+    let device_name = device_name_builder.build();
+    let mut device_builder = X509::builder().map_err(|e| e.to_string())?;
+    device_builder.set_version(2).map_err(|e| e.to_string())?;
+    device_builder.set_subject_name(&device_name).map_err(|e| e.to_string())?;
+    device_builder.set_issuer_name(root_cert.subject_name()).map_err(|e| e.to_string())?;
+    device_builder.set_pubkey(&device_public_key).map_err(|e| e.to_string())?;
+    device_builder.set_not_before(&now).map_err(|e| e.to_string())?;
+    device_builder.set_not_after(&expiry).map_err(|e| e.to_string())?;
+    device_builder.append_extension(BasicConstraints::new().critical().build().map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+    device_builder.append_extension(KeyUsage::new().critical().digital_signature().key_encipherment().build().map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+    let subject_key_id = {
+        let context = device_builder.x509v3_context(Some(&root_cert), None);
+        SubjectKeyIdentifier::new().build(&context).map_err(|e| e.to_string())?
+    };
+    device_builder.append_extension(subject_key_id).map_err(|e| e.to_string())?;
+    device_builder.sign(&root_key, MessageDigest::sha256()).map_err(|e| e.to_string())?;
+    let device_cert = device_builder.build();
 
     let host_id = Uuid::new_v4().to_string().to_uppercase();
     let system_buid = Uuid::new_v4().to_string().to_uppercase();
     let mut record = plist::Dictionary::new();
-    record.insert("DeviceCertificate".into(), plist::Value::Data(device_cert.pem().into_bytes()));
-    record.insert("HostCertificate".into(), plist::Value::Data(host_cert.pem().into_bytes()));
-    record.insert("RootCertificate".into(), plist::Value::Data(root_cert.pem().into_bytes()));
-    record.insert("HostPrivateKey".into(), plist::Value::Data(host_key.serialize_pem().into_bytes()));
-    record.insert("RootPrivateKey".into(), plist::Value::Data(root_key.serialize_pem().into_bytes()));
-    record.insert("DevicePublicKey".into(), plist::Value::Data(device_public_key_der.to_vec()));
+    record.insert("DeviceCertificate".into(), plist::Value::Data(device_cert.to_pem().map_err(|e| e.to_string())?));
+    record.insert("HostCertificate".into(), plist::Value::Data(host_cert.to_pem().map_err(|e| e.to_string())?));
+    record.insert("RootCertificate".into(), plist::Value::Data(root_cert.to_pem().map_err(|e| e.to_string())?));
+    record.insert("HostPrivateKey".into(), plist::Value::Data(host_key.private_key_to_pem_pkcs8().map_err(|e| e.to_string())?));
+    record.insert("RootPrivateKey".into(), plist::Value::Data(root_key.private_key_to_pem_pkcs8().map_err(|e| e.to_string())?));
+    record.insert("DevicePublicKey".into(), plist::Value::Data(device_public_key_pem.to_vec()));
     record.insert("HostID".into(), plist::Value::String(host_id.clone()));
     record.insert("SystemBUID".into(), plist::Value::String(system_buid.clone()));
     record.insert("UniqueDeviceID".into(), plist::Value::String(udid.clone()));
@@ -792,8 +830,10 @@ fn prepare_pairing_materials() -> Result<PairingMaterialResult, String> {
 
     Ok(PairingMaterialResult {
         prepared: true, device_id, unique_device_id: udid, host_id, system_buid,
-        root_certificate_bytes: root_cert.pem().len(), host_certificate_bytes: host_cert.pem().len(),
-        device_certificate_bytes: device_cert.pem().len(), protected_record_path: path.display().to_string()
+        root_certificate_bytes: root_cert.to_pem().map_err(|e| e.to_string())?.len(),
+        host_certificate_bytes: host_cert.to_pem().map_err(|e| e.to_string())?.len(),
+        device_certificate_bytes: device_cert.to_pem().map_err(|e| e.to_string())?.len(),
+        protected_record_path: path.display().to_string()
     })
 }
 
