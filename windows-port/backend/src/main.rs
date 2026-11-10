@@ -3,7 +3,7 @@ mod apple_usbmux;
 mod apple_usbmux_appleio;
 
 use serde::Serialize;
-use std::io::{self, BufRead, Write};
+use std::io::{self, BufRead, Read, Write};
 use windows_sys::Win32::Devices::DeviceAndDriverInstallation::{
     SetupDiDestroyDeviceInfoList, SetupDiEnumDeviceInfo, SetupDiGetClassDevsW,
     SetupDiGetDeviceRegistryPropertyW, SP_DEVINFO_DATA, DIGCF_ALLCLASSES, DIGCF_PRESENT,
@@ -606,7 +606,6 @@ struct PairingPreflightResult {
 }
 
 fn lockdown_send_receive<S: std::io::Read + std::io::Write>(stream: &mut S, request: plist::Value) -> Result<plist::Value, String> {
-    use std::io::{Read, Write};
     let mut payload = Vec::new();
     plist::to_writer_xml(&mut payload, &request).map_err(|e| format!("Lockdown plist serialization failed: {e}"))?;
     let length = u32::try_from(payload.len()).map_err(|_| "Lockdown request is too large".to_string())?;
