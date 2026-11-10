@@ -9,6 +9,8 @@ function App() {
   const [error, setError] = useState("");
   const [inspection, setInspection] = useState(null);
   const [inspecting, setInspecting] = useState(false);
+  const [usbmuxResult, setUsbmuxResult] = useState(null);
+  const [probingMux, setProbingMux] = useState(false);
 
   const refreshStatus = useCallback(() => {
     window.diPlay.getStatus().then(setStatus).catch((err) => setError(String(err)));
@@ -25,6 +27,20 @@ function App() {
       setError(err.message || String(err));
     } finally {
       setInspecting(false);
+    }
+  };
+
+  const probeUsbmux = async () => {
+    setProbingMux(true);
+    setError("");
+    try {
+      const result = await window.diPlay.probeUsbmux();
+      if (result.status !== "ok") throw new Error(result.message || "USBMUX 요청에 실패했습니다.");
+      setUsbmuxResult(result.devices);
+    } catch (err) {
+      setError(err.message || String(err));
+    } finally {
+      setProbingMux(false);
     }
   };
 
@@ -70,6 +86,18 @@ function App() {
       <div><div className="panel-label">APPLE USBMUX INTERFACE</div><div className="state">WinUSB Descriptor / Endpoint 조회 · 읽기 전용</div></div>
       <button className="scan-button" onClick={inspectUsb} disabled={inspecting || status?.backend !== "ready"}>{inspecting ? "조회 중..." : "iPhone 인터페이스 분석"}</button>
     </section>
+    <section className="panel scan-panel">
+      <div><div className="panel-label">APPLE USBMUX SERVICE</div><div className="state">127.0.0.1:27015 · ListDevices 요청</div></div>
+      <button className="scan-button" onClick={probeUsbmux} disabled={probingMux || status?.backend !== "ready"}>{probingMux ? "요청 중..." : "Apple USBMUX 장치 조회"}</button>
+    </section>
+    {usbmuxResult && <section className="results">
+      <div className="results-heading"><h2>USBMUX 응답</h2><span>{usbmuxResult.device_count ?? "확인 불가"}개 장치</span></div>
+      <article className="device"><div className="device-info">
+        <strong>MessageType: {usbmuxResult.response_message || "응답 필드 없음"}</strong>
+        <span>Result: {usbmuxResult.result_number ?? "N/A"} · TCP 연결: {usbmuxResult.connected ? "성공" : "실패"}</span>
+        <small>{usbmuxResult.response_preview}</small>
+      </div></article>
+    </section>}
     {inspection && <section className="results">
       <div className="results-heading"><h2>WinUSB 분석 결과</h2><span>{inspection.interfaces.length}개 인터페이스</span></div>
       {inspection.interfaces.map((item, index) => <article className="device" key={index}>
