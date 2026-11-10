@@ -648,6 +648,155 @@ fn lockdown_pairing_preflight() -> Result<PairingPreflightResult, String> {
     Ok(PairingPreflightResult { connected: true, device_id: selected, unique_device_id: udid, device_name: name, product_version: version, device_public_key_bytes: public_key_bytes, has_device_public_key: true })
 }
 
+
+#[derive(Serialize)]
+struct PairingMaterialResult {
+    prepared: bool,
+    device_id: u64,
+    unique_device_id: String,
+    host_id: String,
+    system_buid: String,
+    root_certificate_bytes: usize,
+    host_certificate_bytes: usize,
+    device_certificate_bytes: usize,
+    protected_record_path: String,
+}
+
+#[cfg(windows)]
+fn dpapi_protect(input: &[u8]) -> Result<Vec<u8>, String> {
+    use std::ffi::c_void;
+    #[repr(C)]
+    struct DataBlob { cb_data: u32, pb_data: *mut u8 }
+    #[link(name = "Crypt32")]
+    unsafe extern "system" {
+        fn CryptProtectData(data_in: *const DataBlob, description: *const u16, optional_entropy: *const DataBlob,
+            reserved: *mut c_void, prompt: *mut c_void, flags: u32, data_out: *mut DataBlob) -> i32;
+    }
+    #[link(name = "Kernel32")]
+    unsafe extern "system" { fn LocalFree(memory: *mut c_void) -> *mut c_void; }
+
+    let mut source = input.to_vec();
+    let input_blob = DataBlob { cb_data: source.len() as u32, pb_data: source.as_mut_ptr() };
+    let mut output_blob = DataBlob { cb_data: 0, pb_data: std::ptr::null_mut() };
+    let ok = unsafe { CryptProtectData(&input_blob, std::ptr::null(), std::ptr::null(), std::ptr::null_mut(), std::ptr::null_mut(), 1, &mut output_blob) };
+    if ok == 0 { return Err(format!("Windows DPAPI CryptProtectData failed: {}", std::io::Error::last_os_error())); }
+    let protected = unsafe { std::slice::from_raw_parts(output_blob.pb_data, output_blob.cb_data as usize).to_vec() };
+    unsafe { LocalFree(output_blob.pb_data as *mut c_void); }
+    Ok(protected)
+}
+
+#[cfg(not(windows))]
+fn dpapi_protect(_input: &[u8]) -> Result<Vec<u8>, String> {
+    Err("Pairing records can only be protected with Windows DPAPI on Windows.".into())
+}
+
+fn prepare_pairing_materials() -> Result<PairingMaterialResult, String> {
+    use rcgen::{BasicConstraints, CertificateParams, DistinguishedName, DnType, ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose, SubjectPublicKeyInfo};
+    use std::net::{SocketAddr, TcpStream};
+    use std::time::Duration;
+    use uuid::Uuid;
+
+    let address: SocketAddr = "127.0.0.1:27015".parse().unwrap();
+    let mut mux = TcpStream::connect_timeout(&address, Duration::from_secs(3)).map_err(|e| format!("Apple USBMUX connect failed: {e}"))?;
+    mux.set_read_timeout(Some(Duration::from_secs(5))).map_err(|e| e.to_string())?;
+    mux.set_write_timeout(Some(Duration::from_secs(5))).map_err(|e| e.to_string())?;
+    write_usbmux_plist(&mut mux, 1, make_usbmux_message("ListDevices"))?;
+    let list = read_usbmux_plist(&mut mux)?;
+    let list_dict = list.as_dictionary().ok_or_else(|| "USBMUX ListDevices response is not a dictionary".to_string())?;
+    let devices = list_dict.get("DeviceList").and_then(|v| v.as_array()).ok_or_else(|| "USBMUX response has no DeviceList".to_string())?;
+    let selected_entry = devices.iter().find(|entry| {
+        entry.as_dictionary().and_then(|d| d.get("Properties")).and_then(|v| v.as_dictionary())
+            .and_then(|p| p.get("ConnectionType")).and_then(|v| v.as_string()) == Some("USB")
+    }).ok_or_else(|| "No USB-connected iPhone was found".to_string())?;
+    let selected_dict = selected_entry.as_dictionary().unwrap();
+    let device_id = selected_dict.get("DeviceID").and_then(|v| v.as_unsigned_integer()).ok_or("USB device has no DeviceID")?;
+    let props = selected_dict.get("Properties").and_then(|v| v.as_dictionary()).ok_or("USB device has no Properties")?;
+    let udid = props.get("SerialNumber").and_then(|v| v.as_string()).ok_or("USB device has no SerialNumber/UDID")?.to_string();
+    drop(mux);
+
+    let mut mux = TcpStream::connect_timeout(&address, Duration::from_secs(3)).map_err(|e| format!("Apple USBMUX reconnect failed: {e}"))?;
+    mux.set_read_timeout(Some(Duration::from_secs(8))).map_err(|e| e.to_string())?;
+    mux.set_write_timeout(Some(Duration::from_secs(5))).map_err(|e| e.to_string())?;
+    let mut connect = make_usbmux_message("Connect");
+    let connect_dict = connect.as_dictionary_mut().unwrap();
+    connect_dict.insert("DeviceID".into(), plist::Value::Integer(device_id.into()));
+    connect_dict.insert("PortNumber".into(), plist::Value::Integer(u16::to_be(62078).into()));
+    write_usbmux_plist(&mut mux, 2, connect)?;
+    let connected = read_usbmux_plist(&mut mux)?;
+    let connect_result = connected.as_dictionary().and_then(|d| d.get("Number")).and_then(|v| v.as_unsigned_integer())
+        .ok_or_else(|| format!("USBMUX Connect response invalid: {connected:?}"))?;
+    if connect_result != 0 { return Err(format!("USBMUX Connect failed: {connected:?}")); }
+
+    let mut query = plist::Dictionary::new();
+    query.insert("Label".into(), plist::Value::String("DiPlay Windows".into()));
+    query.insert("Request".into(), plist::Value::String("QueryType".into()));
+    let query_result = lockdown_send_receive(&mut mux, plist::Value::Dictionary(query))?;
+    if query_result.as_dictionary().and_then(|d| d.get("Type")).and_then(|v| v.as_string()) != Some("com.apple.mobile.lockdown") {
+        return Err(format!("Unexpected Lockdown service response: {query_result:?}"));
+    }
+    let device_public_key_value = lockdown_get_value(&mut mux, "DevicePublicKey")?;
+    let device_public_key_der = device_public_key_value.as_data().ok_or("DevicePublicKey is not plist data")?;
+    let device_public_key = SubjectPublicKeyInfo::from_der(device_public_key_der)
+        .map_err(|e| format!("iPhone DevicePublicKey is not a supported DER SubjectPublicKeyInfo: {e}"))?;
+
+    // Generate a fresh host CA and host identity. The iPhone public key is used as
+    // the subject key of DeviceCertificate; its private key is never requested.
+    let root_key = KeyPair::generate().map_err(|e| format!("Root key generation failed: {e}"))?;
+    let host_key = KeyPair::generate().map_err(|e| format!("Host key generation failed: {e}"))?;
+
+    let mut root_params = CertificateParams::default();
+    let mut root_dn = DistinguishedName::new();
+    root_dn.push(DnType::CommonName, "DiPlay Windows Pairing Root");
+    root_params.distinguished_name = root_dn;
+    root_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    root_params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+    let root_cert = root_params.self_signed(&root_key).map_err(|e| format!("Root certificate generation failed: {e}"))?;
+
+    let mut host_params = CertificateParams::default();
+    let mut host_dn = DistinguishedName::new();
+    host_dn.push(DnType::CommonName, "DiPlay Windows Host");
+    host_params.distinguished_name = host_dn;
+    host_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
+    let host_cert = host_params.signed_by(&host_key, &root_cert, &root_key)
+        .map_err(|e| format!("Host certificate generation failed: {e}"))?;
+
+    let mut device_params = CertificateParams::default();
+    let mut device_dn = DistinguishedName::new();
+    device_dn.push(DnType::CommonName, format!("iPhone {udid}"));
+    device_params.distinguished_name = device_dn;
+    let device_cert = device_params.signed_by(&device_public_key, &root_cert, &root_key)
+        .map_err(|e| format!("Device certificate generation failed: {e}"))?;
+
+    let host_id = Uuid::new_v4().to_string().to_uppercase();
+    let system_buid = Uuid::new_v4().to_string().to_uppercase();
+    let mut record = plist::Dictionary::new();
+    record.insert("DeviceCertificate".into(), plist::Value::Data(device_cert.pem().into_bytes()));
+    record.insert("HostCertificate".into(), plist::Value::Data(host_cert.pem().into_bytes()));
+    record.insert("RootCertificate".into(), plist::Value::Data(root_cert.pem().into_bytes()));
+    record.insert("HostPrivateKey".into(), plist::Value::Data(host_key.serialize_pem().into_bytes()));
+    record.insert("RootPrivateKey".into(), plist::Value::Data(root_key.serialize_pem().into_bytes()));
+    record.insert("DevicePublicKey".into(), plist::Value::Data(device_public_key_der.to_vec()));
+    record.insert("HostID".into(), plist::Value::String(host_id.clone()));
+    record.insert("SystemBUID".into(), plist::Value::String(system_buid.clone()));
+    record.insert("UniqueDeviceID".into(), plist::Value::String(udid.clone()));
+
+    let mut serialized = Vec::new();
+    plist::to_writer_binary(&mut serialized, &plist::Value::Dictionary(record))
+        .map_err(|e| format!("PairRecord serialization failed: {e}"))?;
+    let protected = dpapi_protect(&serialized)?;
+    let base = std::env::var("LOCALAPPDATA").map_err(|_| "LOCALAPPDATA is not available".to_string())?;
+    let dir = std::path::PathBuf::from(base).join("DiPlay").join("Pairing");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("Cannot create protected pairing directory: {e}"))?;
+    let path = dir.join(format!("{udid}.pairrecord.dpapi"));
+    std::fs::write(&path, protected).map_err(|e| format!("Cannot save DPAPI-protected PairRecord: {e}"))?;
+
+    Ok(PairingMaterialResult {
+        prepared: true, device_id, unique_device_id: udid, host_id, system_buid,
+        root_certificate_bytes: root_cert.pem().len(), host_certificate_bytes: host_cert.pem().len(),
+        device_certificate_bytes: device_cert.pem().len(), protected_record_path: path.display().to_string()
+    })
+}
+
 fn print_response<T: Serialize>(event: &'static str, status: &'static str, message: Option<String>, devices: Option<T>) {
     let response = Response { event, status, message, devices };
     if let Ok(json) = serde_json::to_string(&response) { println!("{json}"); }
@@ -678,6 +827,10 @@ fn main() {
             "lockdown:pairing-preflight" => match lockdown_pairing_preflight() {
                 Ok(result) => print_response("lockdown:pairing-preflight", "ok", None, Some(result)),
                 Err(error) => print_response::<PairingPreflightResult>("lockdown:pairing-preflight", "error", Some(error), None),
+            },
+            "pairing:prepare" => match prepare_pairing_materials() {
+                Ok(result) => print_response("pairing:prepare", "ok", None, Some(result)),
+                Err(error) => print_response::<PairingMaterialResult>("pairing:prepare", "error", Some(error), None),
             },
             _ => print_response::<Vec<Device>>("error", "unknown-command", Some("Unknown command".to_string()), None),
         }
