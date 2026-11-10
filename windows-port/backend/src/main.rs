@@ -2,7 +2,7 @@ use serde::Serialize;
 use std::io::{self, BufRead};
 use windows_sys::Win32::Devices::DeviceAndDriverInstallation::{
     SetupDiDestroyDeviceInfoList, SetupDiEnumDeviceInfo, SetupDiGetClassDevsW,
-    SetupDiGetDeviceRegistryPropertyW, SP_DEVINFO_DATA, DIGCF_ALLCLASSES,
+    SetupDiGetDeviceRegistryPropertyW, SP_DEVINFO_DATA, DIGCF_ALLCLASSES, DIGCF_PRESENT,
 };
 use windows_sys::Win32::Foundation::{GetLastError, ERROR_NO_MORE_ITEMS, INVALID_HANDLE_VALUE};
 
@@ -71,7 +71,14 @@ fn enumerate_usb() -> Result<Vec<Device>, String> {
         SPDRP_DEVICEDESC, SPDRP_FRIENDLYNAME, SPDRP_HARDWAREID,
     };
     let enumerator = wide("USB");
-    let set = unsafe { SetupDiGetClassDevsW(std::ptr::null(), enumerator.as_ptr(), 0, DIGCF_ALLCLASSES) };
+    let set = unsafe {
+        SetupDiGetClassDevsW(
+            std::ptr::null(),
+            enumerator.as_ptr(),
+            0,
+            DIGCF_ALLCLASSES | DIGCF_PRESENT,
+        )
+    };
     if set == INVALID_HANDLE_VALUE {
         return Err(format!("SetupDiGetClassDevsW failed: {}", unsafe { GetLastError() }));
     }
