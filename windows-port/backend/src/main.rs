@@ -381,7 +381,6 @@ struct UsbMuxProbeResult {
 }
 
 fn probe_usbmux() -> Result<UsbMuxProbeResult, String> {
-    use std::io::{Read, Write};
     use std::net::{SocketAddr, TcpStream};
     use std::time::Duration;
 
