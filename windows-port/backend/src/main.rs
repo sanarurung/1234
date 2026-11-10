@@ -572,7 +572,7 @@ struct PairingPreflightResult {
     has_device_public_key: bool,
 }
 
-fn lockdown_send_receive(stream: &mut std::net::TcpStream, request: plist::Value) -> Result<plist::Value, String> {
+fn lockdown_send_receive<S: std::io::Read + std::io::Write>(stream: &mut S, request: plist::Value) -> Result<plist::Value, String> {
     use std::io::{Read, Write};
     let mut payload = Vec::new();
     plist::to_writer_xml(&mut payload, &request).map_err(|e| format!("Lockdown plist serialization failed: {e}"))?;
@@ -1217,6 +1217,164 @@ fn validate_lockdown_pairing() -> Result<ValidatePairResult, String> {
     })
 }
 
+
+#[derive(Serialize)]
+struct StartSessionResult {
+    device_id: u64,
+    unique_device_id: String,
+    session_id: String,
+    ssl_enabled: bool,
+    tls_established: bool,
+    device_name: String,
+    message: String,
+}
+
+fn start_lockdown_session() -> Result<StartSessionResult, String> {
+    use openssl::pkey::PKey;
+    use openssl::ssl::{Ssl, SslContextBuilder, SslMethod, SslStream, SslVerifyMode};
+    use openssl::x509::X509;
+    use std::net::{SocketAddr, TcpStream};
+    use std::time::Duration;
+
+    let prepared = prepare_pairing_materials()?;
+    let protected = std::fs::read(&prepared.protected_record_path)
+        .map_err(|e| format!("Cannot read protected PairRecord: {e}"))?;
+    let clear = dpapi_unprotect(&protected)?;
+    let stored: plist::Value = plist::from_reader(std::io::Cursor::new(clear))
+        .map_err(|e| format!("Cannot parse protected PairRecord: {e}"))?;
+    let record = stored.as_dictionary().ok_or("Protected PairRecord is not a dictionary")?;
+
+    let get_data = |key: &str| -> Result<Vec<u8>, String> {
+        record.get(key).and_then(|v| v.as_data()).map(|v| v.to_vec())
+            .ok_or_else(|| format!("PairRecord is missing binary field {key}"))
+    };
+    let get_string = |key: &str| -> Result<String, String> {
+        record.get(key).and_then(|v| v.as_string()).map(str::to_owned)
+            .ok_or_else(|| format!("PairRecord is missing string field {key}"))
+    };
+
+    let host_id = get_string("HostID")?;
+    let system_buid = get_string("SystemBUID")?;
+    let host_cert = X509::from_pem(&get_data("HostCertificate")?)
+        .map_err(|e| format!("Saved HostCertificate is invalid: {e}"))?;
+    let host_key = PKey::private_key_from_pem(&get_data("HostPrivateKey")?)
+        .map_err(|e| format!("Saved HostPrivateKey is invalid: {e}"))?;
+    let root_cert = X509::from_pem(&get_data("RootCertificate")?)
+        .map_err(|e| format!("Saved RootCertificate is invalid: {e}"))?;
+
+    let address: SocketAddr = "127.0.0.1:27015".parse().unwrap();
+    let mut mux = TcpStream::connect_timeout(&address, Duration::from_secs(3))
+        .map_err(|e| format!("Apple USBMUX connect failed: {e}"))?;
+    mux.set_read_timeout(Some(Duration::from_secs(15))).map_err(|e| e.to_string())?;
+    mux.set_write_timeout(Some(Duration::from_secs(8))).map_err(|e| e.to_string())?;
+
+    write_usbmux_plist(&mut mux, 1, make_usbmux_message("ListDevices"))?;
+    let list = read_usbmux_plist(&mut mux)?;
+    let devices = list.as_dictionary().and_then(|d| d.get("DeviceList"))
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| format!("USBMUX ListDevices response has no DeviceList: {list:?}"))?;
+    let selected = devices.iter().find(|entry| {
+        let Some(d) = entry.as_dictionary() else { return false; };
+        let Some(props) = d.get("Properties").and_then(|v| v.as_dictionary()) else { return false; };
+        props.get("ConnectionType").and_then(|v| v.as_string()) == Some("USB")
+            && props.get("SerialNumber").and_then(|v| v.as_string()) == Some(prepared.unique_device_id.as_str())
+    }).ok_or("The paired iPhone is not attached over USB")?;
+    let device_id = selected.as_dictionary().and_then(|d| d.get("DeviceID"))
+        .and_then(|v| v.as_unsigned_integer()).ok_or("USB device has no DeviceID")?;
+    drop(mux);
+
+    let mut mux = TcpStream::connect_timeout(&address, Duration::from_secs(3))
+        .map_err(|e| format!("Apple USBMUX reconnect failed: {e}"))?;
+    mux.set_read_timeout(Some(Duration::from_secs(20))).map_err(|e| e.to_string())?;
+    mux.set_write_timeout(Some(Duration::from_secs(8))).map_err(|e| e.to_string())?;
+
+    let mut connect = make_usbmux_message("Connect");
+    let connect_dict = connect.as_dictionary_mut().unwrap();
+    connect_dict.insert("DeviceID".into(), plist::Value::Integer(device_id.into()));
+    connect_dict.insert("PortNumber".into(), plist::Value::Integer(u16::to_be(62078).into()));
+    write_usbmux_plist(&mut mux, 2, connect)?;
+    let connected = read_usbmux_plist(&mut mux)?;
+    let connect_code = connected.as_dictionary().and_then(|d| d.get("Number"))
+        .and_then(|v| v.as_unsigned_integer())
+        .ok_or_else(|| format!("USBMUX Connect response is invalid: {connected:?}"))?;
+    if connect_code != 0 {
+        return Err(format!("USBMUX Connect to lockdownd failed: {connected:?}"));
+    }
+
+    let mut request = plist::Dictionary::new();
+    request.insert("Label".into(), plist::Value::String("DiPlay Windows".into()));
+    request.insert("Request".into(), plist::Value::String("StartSession".into()));
+    request.insert("HostID".into(), plist::Value::String(host_id));
+    request.insert("SystemBUID".into(), plist::Value::String(system_buid));
+
+    let response = lockdown_send_receive(&mut mux, plist::Value::Dictionary(request))?;
+    let response_dict = response.as_dictionary()
+        .ok_or_else(|| format!("Lockdown StartSession response is not a dictionary: {response:?}"))?;
+    if let Some(error) = response_dict.get("Error").and_then(|v| v.as_string()) {
+        return Err(format!("Lockdown StartSession rejected the host: {error}; response={response:?}"));
+    }
+    if response_dict.get("Request").and_then(|v| v.as_string()) != Some("StartSession") {
+        return Err(format!("Unexpected Lockdown StartSession response: {response:?}"));
+    }
+    let session_id = response_dict.get("SessionID").and_then(|v| v.as_string())
+        .ok_or_else(|| format!("StartSession response has no SessionID: {response:?}"))?.to_string();
+    let ssl_enabled = matches!(response_dict.get("EnableSessionSSL"), Some(plist::Value::Boolean(true)));
+
+    let device_name;
+    let tls_established;
+    if ssl_enabled {
+        let mut context = SslContextBuilder::new(SslMethod::tls_client())
+            .map_err(|e| format!("TLS context creation failed: {e}"))?;
+        context.set_certificate(&host_cert)
+            .map_err(|e| format!("Cannot load HostCertificate for TLS: {e}"))?;
+        context.set_private_key(&host_key)
+            .map_err(|e| format!("Cannot load HostPrivateKey for TLS: {e}"))?;
+        context.check_private_key()
+            .map_err(|e| format!("HostCertificate and HostPrivateKey do not match: {e}"))?;
+        context.cert_store_mut().add_cert(root_cert)
+            .map_err(|e| format!("Cannot add RootCertificate to TLS trust store: {e}"))?;
+        context.set_verify(SslVerifyMode::PEER);
+        let context = context.build();
+        let ssl = Ssl::new(&context).map_err(|e| format!("TLS session creation failed: {e}"))?;
+        let mut tls = SslStream::new(ssl, mux)
+            .map_err(|e| format!("TLS stream creation failed: {e}"))?;
+        tls.connect().map_err(|e| format!("Lockdown TLS handshake failed: {e}"))?;
+        tls_established = true;
+        device_name = lockdown_get_value(&mut tls, "DeviceName")?
+            .as_string().unwrap_or("iPhone".into()).to_string();
+
+        let mut stop = plist::Dictionary::new();
+        stop.insert("Label".into(), plist::Value::String("DiPlay Windows".into()));
+        stop.insert("Request".into(), plist::Value::String("StopSession".into()));
+        stop.insert("SessionID".into(), plist::Value::String(session_id.clone()));
+        let _ = lockdown_send_receive(&mut tls, plist::Value::Dictionary(stop));
+    } else {
+        device_name = lockdown_get_value(&mut mux, "DeviceName")?
+            .as_string().unwrap_or("iPhone".into()).to_string();
+        tls_established = false;
+
+        let mut stop = plist::Dictionary::new();
+        stop.insert("Label".into(), plist::Value::String("DiPlay Windows".into()));
+        stop.insert("Request".into(), plist::Value::String("StopSession".into()));
+        stop.insert("SessionID".into(), plist::Value::String(session_id.clone()));
+        let _ = lockdown_send_receive(&mut mux, plist::Value::Dictionary(stop));
+    }
+
+    Ok(StartSessionResult {
+        device_id,
+        unique_device_id: prepared.unique_device_id,
+        session_id,
+        ssl_enabled,
+        tls_established,
+        device_name: device_name.clone(),
+        message: if ssl_enabled {
+            format!("StartSession 및 TLS 핸드셰이크 성공. {device_name}의 DeviceName을 암호화된 Lockdown 세션에서 읽었습니다.")
+        } else {
+            format!("StartSession 성공. 기기가 TLS를 요구하지 않아 평문 Lockdown 세션으로 DeviceName을 읽었습니다.")
+        },
+    })
+}
+
 fn print_response<T: Serialize>(event: &'static str, status: &'static str, message: Option<String>, devices: Option<T>) {
     let response = Response { event, status, message, devices };
     if let Ok(json) = serde_json::to_string(&response) { println!("{json}"); }
@@ -1259,7 +1417,11 @@ fn main() {
             "pairing:validate" => match validate_lockdown_pairing() {
                 Ok(result) => print_response("pairing:validate", "ok", None, Some(result)),
                 Err(error) => print_response::<ValidatePairResult>("pairing:validate", "error", Some(error), None),
-            },
+            }
+            "lockdown:start-session" => match start_lockdown_session() {
+                Ok(result) => print_response("lockdown:start-session", "ok", None, Some(result)),
+                Err(error) => print_response::<StartSessionResult>("lockdown:start-session", "error", Some(error), None),
+            },,
             _ => print_response::<Vec<Device>>("error", "unknown-command", Some("Unknown command".to_string()), None),
         }
     }
