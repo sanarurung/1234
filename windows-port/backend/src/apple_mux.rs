@@ -22,6 +22,17 @@ pub struct AppleMuxModeRequestResult {
     pub message: String,
 }
 
+
+#[derive(Serialize)]
+pub struct AppleMuxModeDiagnosticResult {
+    pub interface_path: String,
+    pub active_configuration: Option<u8>,
+    pub usb_mode_read: usize,
+    pub usb_mode_hex: String,
+    pub usb_mode_values: Vec<u8>,
+    pub message: String,
+}
+
 #[cfg(windows)]
 mod platform {
     use super::{AppleMuxDescriptorResult, AppleMuxModeRequestResult};
@@ -160,6 +171,27 @@ mod platform {
         Ok((response[8..].to_vec(), u32::from(vid), u32::from(pid), returned))
     }
 
+
+    pub fn read_mode_diagnostic() -> Result<AppleMuxModeDiagnosticResult, String> {
+        let (handle, path) = open_apple_mux()?;
+        let result = (|| {
+            let (config, config_n) = control_in(handle, 0x80, 0x08, 0, 0, 1)?;
+            let active_configuration = if config_n >= 9 { Some(config[8]) } else { None };
+            let (mode, mode_n) = control_in(handle, 0xC0, 0x45, 0, 0, 4)?;
+            let values = if mode_n >= 8 { mode[8..mode_n as usize].to_vec() } else { Vec::new() };
+            Ok(AppleMuxModeDiagnosticResult {
+                interface_path: path,
+                active_configuration,
+                usb_mode_read: values.len(),
+                usb_mode_hex: hex(&values),
+                usb_mode_values: values,
+                message: format!("Read-only USB state. GET_CONFIGURATION bytes={config_n}; GET_USB_MODE bytes={mode_n}. No configuration or driver state was changed."),
+            })
+        })();
+        unsafe { CloseHandle(handle); }
+        result
+    }
+
     pub fn read_descriptor() -> Result<AppleMuxDescriptorResult, String> {
         let (handle, path) = open_apple_mux()?;
         let result = (|| {
@@ -214,3 +246,8 @@ pub fn request_carplay_mode() -> Result<AppleMuxModeRequestResult, String> { pla
 pub fn request_carplay_mode() -> Result<AppleMuxModeRequestResult, String> {
     Err("Apple MUX1 control transfers are supported on Windows only.".into())
 }
+
+#[cfg(windows)]
+pub fn read_mode_diagnostic() -> Result<AppleMuxModeDiagnosticResult, String> { platform::read_mode_diagnostic() }
+#[cfg(not(windows))]
+pub fn read_mode_diagnostic() -> Result<AppleMuxModeDiagnosticResult, String> { Err("Apple MUX diagnostics are supported on Windows only.".into()) }
