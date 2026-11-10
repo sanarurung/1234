@@ -1384,6 +1384,7 @@ struct ServiceProbe {
     available: bool,
     port: Option<u64>,
     ssl_enabled: Option<bool>,
+    tls_established: Option<bool>,
     error: Option<String>,
 }
 
@@ -1398,6 +1399,57 @@ struct ServiceDiscoveryResult {
     tls_established: bool,
     services: Vec<ServiceProbe>,
     message: String,
+}
+
+
+fn probe_service_tls(
+    device_id: u64,
+    port: u64,
+    host_cert: &openssl::x509::X509,
+    host_key: &openssl::pkey::PKey<openssl::pkey::Private>,
+    root_cert: &openssl::x509::X509,
+) -> Result<(), String> {
+    use openssl::ssl::{Ssl, SslContextBuilder, SslMethod, SslStream, SslVerifyMode};
+    use std::net::{SocketAddr, TcpStream};
+    use std::time::Duration;
+
+    if port == 0 || port > u16::MAX as u64 {
+        return Err(format!("Invalid service port: {port}"));
+    }
+    let address: SocketAddr = "127.0.0.1:27015".parse().unwrap();
+    let mut mux = TcpStream::connect_timeout(&address, Duration::from_secs(3))
+        .map_err(|e| format!("USBMUX connect failed: {e}"))?;
+    mux.set_read_timeout(Some(Duration::from_secs(12))).map_err(|e| e.to_string())?;
+    mux.set_write_timeout(Some(Duration::from_secs(8))).map_err(|e| e.to_string())?;
+
+    let mut connect = make_usbmux_message("Connect");
+    let dict = connect.as_dictionary_mut().unwrap();
+    dict.insert("DeviceID".into(), plist::Value::Integer(device_id.into()));
+    dict.insert("PortNumber".into(), plist::Value::Integer(u16::to_be(port as u16).into()));
+    write_usbmux_plist(&mut mux, 3, connect)?;
+    let response = read_usbmux_plist(&mut mux)?;
+    let code = response.as_dictionary().and_then(|d| d.get("Number"))
+        .and_then(|v| v.as_unsigned_integer())
+        .ok_or_else(|| format!("USBMUX service Connect response invalid: {response:?}"))?;
+    if code != 0 {
+        return Err(format!("USBMUX could not connect to service port {port}: {response:?}"));
+    }
+
+    let mut context = SslContextBuilder::new(SslMethod::tls_client())
+        .map_err(|e| format!("TLS context creation failed: {e}"))?;
+    context.set_certificate(host_cert).map_err(|e| format!("Cannot load HostCertificate: {e}"))?;
+    context.set_private_key(host_key).map_err(|e| format!("Cannot load HostPrivateKey: {e}"))?;
+    context.check_private_key().map_err(|e| format!("Host certificate/key mismatch: {e}"))?;
+    context.cert_store_mut().add_cert(root_cert.clone())
+        .map_err(|e| format!("Cannot add RootCertificate: {e}"))?;
+    context.set_verify(SslVerifyMode::PEER);
+    let context = context.build();
+    let mut ssl = Ssl::new(&context).map_err(|e| format!("TLS session creation failed: {e}"))?;
+    ssl.set_connect_state();
+    let mut tls = SslStream::new(ssl, mux).map_err(|e| format!("TLS stream creation failed: {e}"))?;
+    tls.connect().map_err(|e| format!("Service TLS handshake failed on port {port}: {e}"))?;
+    drop(tls);
+    Ok(())
 }
 
 fn discover_lockdown_services() -> Result<ServiceDiscoveryResult, String> {
@@ -1529,33 +1581,47 @@ fn discover_lockdown_services() -> Result<ServiceDiscoveryResult, String> {
                 let Some(dict) = value.as_dictionary() else {
                     services.push(ServiceProbe {
                         identifier: identifier.into(), available: false, port: None,
-                        ssl_enabled: None, error: Some("Response was not a plist dictionary".into())
+                        ssl_enabled: None, tls_established: None, error: Some("Response was not a plist dictionary".into())
                     });
                     continue;
                 };
                 if let Some(error) = dict.get("Error").and_then(|v| v.as_string()) {
                     services.push(ServiceProbe {
                         identifier: identifier.into(), available: false, port: None,
-                        ssl_enabled: None, error: Some(error.into())
+                        ssl_enabled: None, tls_established: None, error: Some(error.into())
                     });
                     continue;
                 }
                 let port = dict.get("Port").and_then(|v| v.as_unsigned_integer());
                 let available = port.is_some_and(|p| p > 0 && p <= u16::MAX as u64);
+                let ssl_enabled = dict.get("EnableServiceSSL").and_then(|v| match v {
+                    plist::Value::Boolean(value) => Some(*value),
+                    _ => None,
+                });
+                let (tls_established, tls_error) = if available && ssl_enabled == Some(true) {
+                    match probe_service_tls(device_id, port.unwrap(), &host_cert, &host_key, &root_cert) {
+                        Ok(()) => (Some(true), None),
+                        Err(error) => (Some(false), Some(error)),
+                    }
+                } else {
+                    (None, None)
+                };
                 services.push(ServiceProbe {
                     identifier: identifier.into(),
                     available,
                     port,
-                    ssl_enabled: dict.get("EnableServiceSSL").and_then(|v| match v {
-                        plist::Value::Boolean(value) => Some(*value),
-                        _ => None,
-                    }),
-                    error: if available { None } else { Some(format!("Unexpected StartService response: {value:?}")) },
+                    ssl_enabled,
+                    tls_established,
+                    error: if !available {
+                        Some(format!("Unexpected StartService response: {value:?}"))
+                    } else {
+                        tls_error
+                    },
                 });
             }
             Err(error) => services.push(ServiceProbe {
                 identifier: identifier.into(), available: false, port: None,
-                ssl_enabled: None, error: Some(error)
+                ssl_enabled: None, tls_established: None, error: Some(error)
             }),
         }
     }
