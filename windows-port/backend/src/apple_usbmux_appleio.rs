@@ -251,7 +251,7 @@ mod platform {
                     ioctl(handle, read_code, reply.as_ptr() as *const c_void, reply.len() as u32,
                         reply.as_mut_ptr() as *mut c_void, reply.len() as u32)
                 }.map_err(|e| format!("Apple MUX bulk read (pipe {read_pipe}, IOCTL 0x{read_code:08X}) failed: {e}"))? as usize;
-                if read < 20 { return Err(format!("USBMUX VERSION reply too short: {read} bytes ({})", hex(&reply[..read])); }
+                if read < 20 { return Err(format!("USBMUX VERSION reply too short: {read} bytes ({})", hex(&reply[..read]))); }
                 reply.truncate(read);
                 let protocol = u32::from_be_bytes(reply[0..4].try_into().unwrap());
                 let frame_len = u32::from_be_bytes(reply[4..8].try_into().unwrap()) as usize;
