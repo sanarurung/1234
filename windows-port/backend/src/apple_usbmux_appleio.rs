@@ -50,7 +50,9 @@ mod platform {
     const USBMUX_VERSION_REQUEST_SIZE: usize = 20;
     const USBMUX_HEADER_SIZE: usize = 16;
     const MAX_REPLY: usize = 0x8000;
-    const IO_TIMEOUT_MS: u32 = 15000;
+    // Match the Android VERSION handshake read window; avoid cancelling and
+    // re-issuing the same bulk-IN request every 15 seconds.
+    const IO_TIMEOUT_MS: u32 = HANDSHAKE_TIMEOUT_MS;
     const HANDSHAKE_TIMEOUT_MS: u32 = 60000;
     const MAX_STALE_HANDSHAKE_FRAMES: usize = 32;
     const WAIT_OBJECT_0: u32 = 0;
