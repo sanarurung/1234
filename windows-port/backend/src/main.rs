@@ -75,7 +75,7 @@ fn enumerate_usb() -> Result<Vec<Device>, String> {
         SetupDiGetClassDevsW(
             std::ptr::null(),
             enumerator.as_ptr(),
-            0,
+            std::ptr::null_mut(),
             DIGCF_ALLCLASSES | DIGCF_PRESENT,
         )
     };
