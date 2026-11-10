@@ -23,6 +23,8 @@ function App() {
   const [validatingPair, setValidatingPair] = useState(false);
   const [sessionResult, setSessionResult] = useState(null);
   const [startingSession, setStartingSession] = useState(false);
+  const [serviceDiscovery, setServiceDiscovery] = useState(null);
+  const [discoveringServices, setDiscoveringServices] = useState(false);
 
   const refreshStatus = useCallback(() => {
     window.diPlay.getStatus().then(setStatus).catch((err) => setError(String(err)));
@@ -133,6 +135,21 @@ function App() {
     }
   };
 
+
+  const discoverServices = async () => {
+    setDiscoveringServices(true);
+    setError("");
+    try {
+      const result = await window.diPlay.discoverLockdownServices();
+      if (result.status !== "ok") throw new Error(result.message || "서비스 탐색에 실패했습니다.");
+      setServiceDiscovery(result.devices);
+    } catch (err) {
+      setError(err.message || String(err));
+    } finally {
+      setDiscoveringServices(false);
+    }
+  };
+
   const validatePairing = async () => {
     setValidatingPair(true);
     setError("");
@@ -223,6 +240,28 @@ function App() {
       <div><div className="panel-label">LOCKDOWN START SESSION</div><div className="state">iOS 7 이상은 ValidatePair 대신 StartSession으로 세션을 시작합니다. TLS가 요청되면 Host 인증서로 핸드셰이크합니다.</div></div>
       <button className="scan-button" onClick={startLockdownSession} disabled={startingSession || status?.backend !== "ready"}>{startingSession ? "세션 시작 중..." : "Lockdown 세션 시작"}</button>
     </section>
+
+
+    <section className="panel scan-panel">
+      <div><div className="panel-label">LOCKDOWN SERVICE DISCOVERY</div><div className="state">TLS 세션 → 제한된 저위험 서비스의 StartService 응답 확인 · 서비스 명령 미실행</div></div>
+      <button className="scan-button" onClick={discoverServices} disabled={discoveringServices || status?.backend !== "ready"}>{discoveringServices ? "서비스 탐색 중..." : "Lockdown 서비스 탐색"}</button>
+    </section>
+    {serviceDiscovery && <section className="results">
+      <div className="results-heading"><h2>Lockdown 서비스 탐색 결과</h2><span>{serviceDiscovery.services.filter((item) => item.available).length}개 사용 가능</span></div>
+      <article className="device"><div className="device-info">
+        <strong>{serviceDiscovery.device_name} · iOS {serviceDiscovery.product_version || "버전 확인 불가"}</strong>
+        <span>{serviceDiscovery.product_type || "ProductType 미확인"} · Build {serviceDiscovery.build_version || "미확인"} · TLS {String(serviceDiscovery.tls_established)}</span>
+        <small>{serviceDiscovery.message}</small>
+      </div></article>
+      {serviceDiscovery.services.map((item) => <article className="device" key={item.identifier}>
+        <div className="device-icon">SVC</div>
+        <div className="device-info">
+          <strong>{item.identifier}</strong>
+          <span>{item.available ? "StartService 성공 · Port " + item.port + " · SSL " + String(item.ssl_enabled) : "사용 불가 또는 시작 거부"}</span>
+          {item.error && <small>{item.error}</small>}
+        </div>
+      </article>)}
+    </section>}
 
     {sessionResult && <section className="results">
       <div className="results-heading"><h2>Lockdown 세션 결과</h2><span>{sessionResult.tls_established ? "TLS 연결 성공" : "세션 연결 성공"}</span></div>
