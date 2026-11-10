@@ -12,8 +12,6 @@ pub struct AppleIoUsbMuxResult {
     pub write_pipe_index: u8,
     pub version_request_hex: String,
     pub version_reply_hex: String,
-    pub setup_request_hex: String,
-    pub setup_written_bytes: u32,
     pub version: u32,
     pub message: String,
 }
@@ -51,9 +49,6 @@ mod platform {
     const USBMUX_VERSION: u32 = 0;
     const USBMUX_VERSION_REQUEST_SIZE: usize = 20;
     const USBMUX_HEADER_SIZE: usize = 16;
-    const USBMUX_SETUP_PROTOCOL: u32 = 2;
-    const USBMUX_SETUP_VALUE: u8 = 0x07;
-    const USBMUX_MAGIC: u32 = 0xfeedface;
     const MAX_REPLY: usize = 0x8000;
     const IO_TIMEOUT_MS: u32 = 15000;
     const HANDSHAKE_TIMEOUT_MS: u32 = 60000;
@@ -324,21 +319,6 @@ mod platform {
                     buffered.extend_from_slice(&chunk);
                 };
 
-                // Android sends protocol 2 / payload 0x07 after VERSION is accepted.
-                let mut setup_request = [0u8; USBMUX_HEADER_SIZE + 1];
-                setup_request[0..4].copy_from_slice(&USBMUX_SETUP_PROTOCOL.to_be_bytes());
-                setup_request[4..8].copy_from_slice(&((USBMUX_HEADER_SIZE as u32) + 1).to_be_bytes());
-                setup_request[8..12].copy_from_slice(&USBMUX_MAGIC.to_be_bytes());
-                setup_request[USBMUX_HEADER_SIZE] = USBMUX_SETUP_VALUE;
-                let setup_len = setup_request.len() as u32;
-                let setup_ptr = setup_request.as_mut_ptr();
-                let setup_written = unsafe {
-                    ioctl(handle, write_code, setup_ptr as *const c_void, setup_len,
-                        setup_ptr as *mut c_void, setup_len)
-                }.map_err(|e| format!("Apple MUX SETUP write (pipe {write_pipe}, endpoint 0x{ep_write:02X}) failed: {e}"))?;
-                if setup_written != setup_len {
-                    return Err(format!("USBMUX SETUP request short write: {setup_written}/{setup_len}"));
-                }
 
                 Ok(AppleIoUsbMuxResult {
                     interface_path: path.clone(),
@@ -351,10 +331,8 @@ mod platform {
                     write_pipe_index: write_pipe,
                     version_request_hex: hex(&version_request),
                     version_reply_hex: hex(&reply),
-                    setup_request_hex: hex(&setup_request),
-                    setup_written_bytes: setup_written,
                     version,
-                    message: format!("AppleUsbFilter IOCTL transport completed USBMUX VERSION v{version} and SETUP writes ({setup_written}/{setup_len} bytes). This confirms driver-level transfer completion only; a persistent receive loop and TCP service connection are not yet implemented. OUT max packet: {write_packet} bytes."),
+                    message: format!("AppleUsbFilter IOCTL transport received a valid USBMUX VERSION v{version} reply after a framed receive loop. SETUP is intentionally not sent because this diagnostic command closes the device handle on return; sending SETUP without retaining the session would immediately tear down the transport. OUT max packet: {write_packet} bytes."),
                 })
             })();
             unsafe { CloseHandle(handle); }
