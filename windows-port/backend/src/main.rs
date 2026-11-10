@@ -13,6 +13,8 @@ struct Device {
     vendor_id: Option<String>,
     product_id: Option<String>,
     interface_number: Option<String>,
+    driver_service: Option<String>,
+    device_class: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -95,7 +97,7 @@ fn parse_id(ids: &[String], key: &str) -> Option<String> {
 #[cfg(windows)]
 fn enumerate_usb() -> Result<Vec<Device>, String> {
     use windows_sys::Win32::Devices::DeviceAndDriverInstallation::{
-        SPDRP_DEVICEDESC, SPDRP_FRIENDLYNAME, SPDRP_HARDWAREID,
+        SPDRP_DEVICEDESC, SPDRP_FRIENDLYNAME, SPDRP_HARDWAREID, SPDRP_SERVICE, SPDRP_CLASS,
     };
     let enumerator = wide("USB");
     let set = unsafe {
@@ -137,7 +139,17 @@ fn enumerate_usb() -> Result<Vec<Device>, String> {
         let name = friendly.first().or(description.first()).cloned()
             .unwrap_or_else(|| format!("USB Device {vendor_id:?}:{product_id:?}"));
         let interface_number = parse_id(&ids, "MI_");
-        devices.push(Device { name, hardware_ids: ids, vendor_id, product_id, interface_number });
+        let driver_service = read_property(set, &info, SPDRP_SERVICE).first().cloned();
+        let device_class = read_property(set, &info, SPDRP_CLASS).first().cloned();
+        devices.push(Device {
+            name,
+            hardware_ids: ids,
+            vendor_id,
+            product_id,
+            interface_number,
+            driver_service,
+            device_class,
+        });
     }
 
     unsafe { SetupDiDestroyDeviceInfoList(set); }
