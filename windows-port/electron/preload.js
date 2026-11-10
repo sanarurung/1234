@@ -7,5 +7,6 @@ contextBridge.exposeInMainWorld("diPlay", {
   probeUsbmux: () => ipcRenderer.invoke("usbmux:probe"),
   queryLockdownType: () => ipcRenderer.invoke("lockdown:query-type"),
   preparePairing: () => ipcRenderer.invoke("pairing:prepare"),
+  requestPairing: () => ipcRenderer.invoke("pairing:pair"),
   pairingPreflight: () => ipcRenderer.invoke("lockdown:pairing-preflight")
 });
