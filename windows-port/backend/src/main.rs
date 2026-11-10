@@ -1417,11 +1417,11 @@ fn main() {
             "pairing:validate" => match validate_lockdown_pairing() {
                 Ok(result) => print_response("pairing:validate", "ok", None, Some(result)),
                 Err(error) => print_response::<ValidatePairResult>("pairing:validate", "error", Some(error), None),
-            }
+            },
             "lockdown:start-session" => match start_lockdown_session() {
                 Ok(result) => print_response("lockdown:start-session", "ok", None, Some(result)),
                 Err(error) => print_response::<StartSessionResult>("lockdown:start-session", "error", Some(error), None),
-            },,
+            },
             _ => print_response::<Vec<Device>>("error", "unknown-command", Some("Unknown command".to_string()), None),
         }
     }
