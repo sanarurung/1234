@@ -12,6 +12,8 @@ pub struct AppleIoUsbMuxResult {
     pub write_pipe_index: u8,
     pub version_request_hex: String,
     pub version_reply_hex: String,
+    pub setup_request_hex: String,
+    pub setup_written_bytes: u32,
     pub version: u32,
     pub message: String,
 }
@@ -29,7 +31,7 @@ mod platform {
         },
         Foundation::{
             CloseHandle, GetLastError, GENERIC_READ, GENERIC_WRITE, HANDLE,
-            INVALID_HANDLE_VALUE, ERROR_IO_PENDING, ERROR_NO_MORE_ITEMS,
+            INVALID_HANDLE_VALUE, ERROR_IO_PENDING, ERROR_NO_MORE_ITEMS, ERROR_OPERATION_ABORTED,
         },
         Storage::FileSystem::{CreateFileW, FILE_FLAG_OVERLAPPED, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING},
     };
@@ -48,8 +50,14 @@ mod platform {
     const IOCTL_GET_SERIAL: u32 = 0x2200AC;
     const USBMUX_VERSION: u32 = 0;
     const USBMUX_VERSION_REQUEST_SIZE: usize = 20;
+    const USBMUX_HEADER_SIZE: usize = 16;
+    const USBMUX_SETUP_PROTOCOL: u32 = 2;
+    const USBMUX_SETUP_VALUE: u8 = 0x07;
+    const USBMUX_MAGIC: u32 = 0xfeedface;
     const MAX_REPLY: usize = 0x8000;
     const IO_TIMEOUT_MS: u32 = 15000;
+    const HANDSHAKE_TIMEOUT_MS: u32 = 60000;
+    const MAX_STALE_HANDSHAKE_FRAMES: usize = 32;
     const WAIT_OBJECT_0: u32 = 0;
     const WAIT_TIMEOUT: u32 = 258;
 
@@ -161,9 +169,25 @@ mod platform {
                     }
                     WAIT_TIMEOUT => {
                         unsafe { CancelIoEx(handle, &mut ov); }
-                        Err(io::Error::new(io::ErrorKind::TimedOut, format!("Apple MUX IOCTL 0x{code:08X} timed out after {IO_TIMEOUT_MS} ms")))
+                        let drained = unsafe { GetOverlappedResult(handle, &mut ov, &mut transferred, 1) };
+                        if drained != 0 {
+                            Ok(transferred)
+                        } else {
+                            let completion_error = unsafe { GetLastError() };
+                            if completion_error == ERROR_OPERATION_ABORTED {
+                                Err(io::Error::new(io::ErrorKind::TimedOut,
+                                    format!("Apple MUX IOCTL 0x{code:08X} timed out after {IO_TIMEOUT_MS} ms")))
+                            } else {
+                                Err(io::Error::from_raw_os_error(completion_error as i32))
+                            }
+                        }
                     }
-                    other => Err(io::Error::other(format!("WaitForSingleObject returned {other}"))),
+                    other => {
+                        unsafe { CancelIoEx(handle, &mut ov); }
+                        let drained = unsafe { GetOverlappedResult(handle, &mut ov, &mut transferred, 1) };
+                        if drained != 0 { Ok(transferred) }
+                        else { Err(io::Error::other(format!("WaitForSingleObject returned {other}; completion error {}", unsafe { GetLastError() }))) }
+                    },
                 }
             }
         };
@@ -240,49 +264,80 @@ mod platform {
                 let ep_read = if read_pipe == 1 { ep1 } else { ep2 };
                 let ep_write = if write_pipe == 1 { ep1 } else { ep2 };
 
-                // Post the bulk-IN request before sending VERSION. Both
-                // Apple pipe IOCTLs use the same buffer for input and output.
-                let read_handle = handle as usize;
-                let read_task = std::thread::scope(|scope| {
-                    let pending_read = scope.spawn(|| {
-                        let mut reply = vec![0u8; MAX_REPLY];
-                        let n = unsafe {
-                            ioctl(read_handle as HANDLE, read_code,
-                                reply.as_ptr() as *const c_void, reply.len() as u32,
-                                reply.as_mut_ptr() as *mut c_void, reply.len() as u32)
-                        }.map_err(|e| format!("Apple MUX bulk read (pipe {read_pipe}, endpoint 0x{ep_read:02X}, IOCTL 0x{read_code:08X}) failed: {e}"))? as usize;
-                        reply.truncate(n);
-                        Ok::<Vec<u8>, String>(reply)
-                    });
+                // Match Android's ordering: send VERSION first, then begin receiving.
+                // Some Apple filter/device combinations may not complete a read posted
+                // before the first OUT transfer.
+                let mut write_buffer = version_request;
+                let write_len = write_buffer.len() as u32;
+                let write_ptr = write_buffer.as_mut_ptr();
+                let written = unsafe {
+                    ioctl(handle, write_code, write_ptr as *const c_void, write_len,
+                        write_ptr as *mut c_void, write_len)
+                }.map_err(|e| format!("Apple MUX VERSION write (pipe {write_pipe}, endpoint 0x{ep_write:02X}, IOCTL 0x{write_code:08X}) failed: {e}"))?;
+                if written != write_len {
+                    return Err(format!("USBMUX VERSION request short write: {written}/{write_len}"));
+                }
 
-                    let mut write_buffer = version_request;
-                    let write_len = write_buffer.len() as u32;
-                    let write_ptr = write_buffer.as_mut_ptr();
-                    let write_result = unsafe {
-                        ioctl(handle, write_code, write_ptr as *const c_void, write_len,
-                            write_ptr as *mut c_void, write_len)
-                    }.map_err(|e| format!("Apple MUX bulk write (pipe {write_pipe}, endpoint 0x{ep_write:02X}, IOCTL 0x{write_code:08X}) failed: {e}"));
-
-                    let read_result = pending_read.join()
-                        .map_err(|_| "Apple MUX reader thread panicked".to_string())?;
-                    let written = write_result?;
-                    if written != write_len {
-                        return Err(format!("USBMUX VERSION request short write: {written}/{write_len}"));
+                // Android accumulates USB completions until it has a complete frame.
+                // Retry a timed-out 15-second IOCTL until the 60-second handshake deadline.
+                let deadline = std::time::Instant::now() + std::time::Duration::from_millis(HANDSHAKE_TIMEOUT_MS as u64);
+                let mut buffered = Vec::<u8>::new();
+                let mut stale_frames = 0usize;
+                let (reply, version) = loop {
+                    while buffered.len() >= USBMUX_HEADER_SIZE {
+                        let protocol = u32::from_be_bytes(buffered[0..4].try_into().unwrap());
+                        let frame_len = u32::from_be_bytes(buffered[4..8].try_into().unwrap()) as usize;
+                        let word8 = u32::from_be_bytes(buffered[8..12].try_into().unwrap());
+                        if !(USBMUX_HEADER_SIZE..=65536).contains(&frame_len) {
+                            return Err(format!("Invalid USBMUX frame length {frame_len}; buffered={} bytes", buffered.len()));
+                        }
+                        if buffered.len() < frame_len { break; }
+                        let frame: Vec<u8> = buffered.drain(..frame_len).collect();
+                        if protocol == USBMUX_VERSION && frame_len == USBMUX_VERSION_REQUEST_SIZE && word8 == 2 {
+                            break (frame, word8);
+                        }
+                        if protocol == 6 && stale_frames < MAX_STALE_HANDSHAKE_FRAMES {
+                            stale_frames += 1;
+                            continue;
+                        }
+                        return Err(format!("Unexpected USBMUX handshake frame: protocol={protocol}, length={frame_len}, word8={word8}, data={}", hex(&frame[..frame.len().min(64)])));
                     }
-                    read_result.map_err(|e| format!(
-                        "{e}; VERSION OUT completed {written}/{write_len} bytes on pipe {write_pipe} endpoint 0x{ep_write:02X} (max packet {write_packet}); IN pipe {read_pipe} endpoint 0x{ep_read:02X} (max packet {})",
-                        if read_pipe == 1 { mp1 } else { mp2 }
-                    ))
-                })?;
-                let mut reply = read_task;
-                let read = reply.len();
-                if read < 20 { return Err(format!("USBMUX VERSION reply too short: {read} bytes ({})", hex(&reply[..read]))); }
-                reply.truncate(read);
-                let protocol = u32::from_be_bytes(reply[0..4].try_into().unwrap());
-                let frame_len = u32::from_be_bytes(reply[4..8].try_into().unwrap()) as usize;
-                let version = u32::from_be_bytes(reply[8..12].try_into().unwrap());
-                if protocol != 0 || frame_len < 20 || frame_len > reply.len() || version != 2 {
-                    return Err(format!("Unexpected USBMUX VERSION reply: protocol={protocol}, length={frame_len}, version={version}, data={}", hex(&reply[..reply.len().min(64)])));
+
+                    let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                    if remaining.is_zero() {
+                        return Err(format!("Timed out waiting for USBMUX VERSION reply after {HANDSHAKE_TIMEOUT_MS} ms; buffered={} bytes", buffered.len()));
+                    }
+                    let mut chunk = vec![0u8; MAX_REPLY];
+                    let n = match unsafe {
+                        ioctl(handle, read_code, chunk.as_ptr() as *const c_void, chunk.len() as u32,
+                            chunk.as_mut_ptr() as *mut c_void, chunk.len() as u32)
+                    } {
+                        Ok(n) => n as usize,
+                        Err(error) if error.kind() == io::ErrorKind::TimedOut => continue,
+                        Err(error) => return Err(format!("Apple MUX bulk read (pipe {read_pipe}, endpoint 0x{ep_read:02X}, IOCTL 0x{read_code:08X}) failed: {error}; VERSION OUT completed {written}/{write_len} bytes on pipe {write_pipe} endpoint 0x{ep_write:02X} (max packet {write_packet})")),
+                    };
+                    if n > chunk.len() {
+                        return Err(format!("Apple MUX bulk read returned impossible length {n} for {}-byte buffer", chunk.len()));
+                    }
+                    if n == 0 { continue; }
+                    chunk.truncate(n);
+                    buffered.extend_from_slice(&chunk);
+                };
+
+                // Android sends protocol 2 / payload 0x07 after VERSION is accepted.
+                let mut setup_request = [0u8; USBMUX_HEADER_SIZE + 1];
+                setup_request[0..4].copy_from_slice(&USBMUX_SETUP_PROTOCOL.to_be_bytes());
+                setup_request[4..8].copy_from_slice(&(setup_request.len() as u32).to_be_bytes());
+                setup_request[8..12].copy_from_slice(&USBMUX_MAGIC.to_be_bytes());
+                setup_request[USBMUX_HEADER_SIZE] = USBMUX_SETUP_VALUE;
+                let setup_len = setup_request.len() as u32;
+                let setup_ptr = setup_request.as_mut_ptr();
+                let setup_written = unsafe {
+                    ioctl(handle, write_code, setup_ptr as *const c_void, setup_len,
+                        setup_ptr as *mut c_void, setup_len)
+                }.map_err(|e| format!("Apple MUX SETUP write (pipe {write_pipe}, endpoint 0x{ep_write:02X}) failed: {e}"))?;
+                if setup_written != setup_len {
+                    return Err(format!("USBMUX SETUP request short write: {setup_written}/{setup_len}"));
                 }
 
                 Ok(AppleIoUsbMuxResult {
@@ -295,9 +350,11 @@ mod platform {
                     read_pipe_index: read_pipe,
                     write_pipe_index: write_pipe,
                     version_request_hex: hex(&version_request),
-                    version_reply_hex: hex(&reply[..frame_len]),
+                    version_reply_hex: hex(&reply),
+                    setup_request_hex: hex(&setup_request),
+                    setup_written_bytes: setup_written,
                     version,
-                    message: format!("AppleUsbFilter IOCTL transport is active. USBMUX VERSION v{version} exchange succeeded. No SETUP frame or persistent stream was started. OUT max packet: {write_packet} bytes."),
+                    message: format!("AppleUsbFilter IOCTL transport completed USBMUX VERSION v{version} and SETUP writes ({setup_written}/{setup_len} bytes). This confirms driver-level transfer completion only; a persistent receive loop and TCP service connection are not yet implemented. OUT max packet: {write_packet} bytes."),
                 })
             })();
             unsafe { CloseHandle(handle); }
