@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 const here = path.dirname(fileURLToPath(import.meta.url));
 function createWindow() {
   const win = new BrowserWindow({ width: 1180, height: 760, minWidth: 900, minHeight: 600, backgroundColor: "#10131a", webPreferences: { preload: path.join(here, "preload.js"), contextIsolation: true, nodeIntegration: false, sandbox: true } });
-  if (process.env.VITE_DEV_SERVER_URL) win.loadURL(process.env.VITE_DEV_SERVER_URL);
+  if (!app.isPackaged) win.loadURL("http://127.0.0.1:5173");
   else win.loadFile(path.join(here, "../dist/index.html"));
 }
 ipcMain.handle("app:get-status", async () => ({ app: "DiPlay for Windows", platform: process.platform, backend: "not-started", usb: "not-implemented" }));
