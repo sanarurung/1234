@@ -21,8 +21,6 @@ function App() {
   const [requestingPairing, setRequestingPairing] = useState(false);
   const [pairValidation, setPairValidation] = useState(null);
   const [validatingPair, setValidatingPair] = useState(false);
-  const [pairValidation, setPairValidation] = useState(null);
-  const [validatingPair, setValidatingPair] = useState(false);
 
   const refreshStatus = useCallback(() => {
     window.diPlay.getStatus().then(setStatus).catch((err) => setError(String(err)));
@@ -132,20 +130,6 @@ function App() {
     }
   };
 
-  const validatePairing = async () => {
-    setValidatingPair(true);
-    setError("");
-    try {
-      const result = await window.diPlay.validatePairing();
-      if (result.status !== "ok") throw new Error(result.message || "ValidatePair 확인에 실패했습니다.");
-      setPairValidation(result.devices);
-    } catch (err) {
-      setError(err.message || String(err));
-    } finally {
-      setValidatingPair(false);
-    }
-  };
-
   const scanUsb = async () => {
     setLoading(true);
     setError("");
@@ -231,19 +215,6 @@ function App() {
         <small>{pairValidation.response_preview}</small>
       </div></article>
     </section>}
-    <section className="panel scan-panel">
-      <div><div className="panel-label">LOCKDOWN VALIDATE PAIR</div><div className="state">PairRecord + HostID를 iPhone에 제시해 신뢰 상태 확인</div></div>
-      <button className="scan-button" onClick={validatePairing} disabled={validatingPair || status?.backend !== "ready"}>{validatingPair ? "신뢰 상태 확인 중..." : "ValidatePair 신뢰 확인"}</button>
-    </section>
-    {pairValidation && <section className="results">
-      <div className="results-heading"><h2>ValidatePair 결과</h2><span>{pairValidation.validated ? "검증 성공" : "확인 필요"}</span></div>
-      <article className="device"><div className="device-info">
-        <strong>DeviceID: {pairValidation.device_id} · {pairValidation.unique_device_id}</strong>
-        <span>{pairValidation.message}</span>
-        <small>EscrowBag: {pairValidation.escrow_bag_bytes} bytes</small>
-        <small>{pairValidation.response_preview}</small>
-      </div></article>
-    </section>}
     {pairingRequest && <section className="results">
       <div className="results-heading"><h2>Lockdown Pair 결과</h2><span>{pairingRequest.pairing_state}</span></div>
       <article className="device"><div className="device-info">
@@ -261,7 +232,7 @@ function App() {
         <small>SystemBUID: {pairingMaterial.system_buid}</small>
         <small>보호 저장 위치: {pairingMaterial.protected_record_path}</small>
       </div></article>
-      <p>현재는 인증서 생성 및 DPAPI 보호 저장까지만 수행했습니다. iPhone에 Pair 요청은 아직 전송하지 않았습니다.</p>
+      <p>PairRecord는 Windows DPAPI로 보호 저장되며, iPhone의 Pair 응답으로 받은 EscrowBag도 함께 보관합니다.</p>
     </section>}
     {lockdownResult && <section className="results">
       <div className="results-heading"><h2>Lockdown 연결 결과</h2><span>{lockdownResult.connected ? "연결 성공" : "연결 실패"}</span></div>
