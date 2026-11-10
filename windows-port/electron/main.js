@@ -89,6 +89,7 @@ ipcMain.handle("pairing:prepare", async () => sendBackendCommand("pairing:prepar
 ipcMain.handle("pairing:pair", async () => sendBackendCommand("pairing:pair"));
 ipcMain.handle("pairing:validate", async () => sendBackendCommand("pairing:validate"));
 ipcMain.handle("lockdown:start-session", async () => sendBackendCommand("lockdown:start-session"));
+ipcMain.handle("lockdown:discover-services", async () => sendBackendCommand("lockdown:discover-services"));
 ipcMain.handle("lockdown:pairing-preflight", async () => sendBackendCommand("lockdown:pairing-preflight"));
 
 app.whenReady().then(() => {
