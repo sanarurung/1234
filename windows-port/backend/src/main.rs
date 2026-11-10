@@ -987,7 +987,7 @@ fn send_lockdown_pair_request() -> Result<PairingRequestResult, String> {
     let protected = std::fs::read(&prepared.protected_record_path)
         .map_err(|e| format!("Cannot read protected PairRecord: {e}"))?;
     let clear = dpapi_unprotect(&protected)?;
-    let stored: plist::Value = plist::from_reader(std::io::Cursor::new(clear))
+    let mut stored: plist::Value = plist::from_reader(std::io::Cursor::new(clear))
         .map_err(|e| format!("Cannot parse protected PairRecord: {e}"))?;
     let stored_dict = stored.as_dictionary()
         .ok_or("Protected PairRecord is not a dictionary")?;
@@ -1093,12 +1093,132 @@ fn send_lockdown_pair_request() -> Result<PairingRequestResult, String> {
         return Err(format!("Lockdown Pair did not succeed: {response:?}"));
     }
 
+    // Persist the EscrowBag returned by lockdownd. Apple clients retain it in
+    // the local pair record for later escrow-protected service requests.
+    if let Some(escrow) = response_dict.get("EscrowBag").and_then(|v| v.as_data()) {
+        let stored_dict = stored.as_dictionary_mut()
+            .ok_or("Protected PairRecord is not a mutable dictionary")?;
+        stored_dict.insert("EscrowBag".into(), plist::Value::Data(escrow.to_vec()));
+        let mut serialized = Vec::new();
+        plist::to_writer_xml(&mut serialized, &stored)
+            .map_err(|e| format!("Updated PairRecord serialization failed: {e}"))?;
+        let updated_protected = dpapi_protect(&serialized)?;
+        let temp_path = format!("{}.tmp", prepared.protected_record_path);
+        std::fs::write(&temp_path, updated_protected)
+            .map_err(|e| format!("Cannot write updated protected PairRecord: {e}"))?;
+        std::fs::rename(&temp_path, &prepared.protected_record_path)
+            .or_else(|_| {
+                std::fs::remove_file(&prepared.protected_record_path)?;
+                std::fs::rename(&temp_path, &prepared.protected_record_path)
+            })
+            .map_err(|e| format!("Cannot replace protected PairRecord: {e}"))?;
+    } else {
+        return Err("Pair succeeded but lockdownd did not return a binary EscrowBag; PairRecord was not finalized".into());
+    }
+
     Ok(PairingRequestResult {
         device_id: prepared.device_id,
         unique_device_id: prepared.unique_device_id,
         pairing_state: "paired".into(),
         response_preview: format!("{response:?}"),
         message: "iPhone이 Pair 요청을 성공으로 응답했습니다. 다음 단계에서 ValidatePair로 신뢰 상태를 확인할 수 있습니다.".into(),
+    })
+}
+
+
+#[derive(Serialize)]
+struct ValidatePairResult {
+    device_id: u64,
+    unique_device_id: String,
+    validated: bool,
+    escrow_bag_bytes: usize,
+    response_preview: String,
+    message: String,
+}
+
+fn validate_lockdown_pairing() -> Result<ValidatePairResult, String> {
+    use std::net::{SocketAddr, TcpStream};
+    use std::time::Duration;
+
+    let prepared = prepare_pairing_materials()?;
+    let protected = std::fs::read(&prepared.protected_record_path)
+        .map_err(|e| format!("Cannot read protected PairRecord: {e}"))?;
+    let clear = dpapi_unprotect(&protected)?;
+    let stored: plist::Value = plist::from_reader(std::io::Cursor::new(clear))
+        .map_err(|e| format!("Cannot parse protected PairRecord: {e}"))?;
+    let stored_dict = stored.as_dictionary()
+        .ok_or("Protected PairRecord is not a dictionary")?;
+    let escrow_bytes = stored_dict.get("EscrowBag").and_then(|v| v.as_data())
+        .map(|v| v.len())
+        .ok_or("PairRecord has no EscrowBag. Run the Pair request and approve it on the iPhone first.")?;
+
+    let mut pair_record = plist::Dictionary::new();
+    for key in ["DeviceCertificate", "HostCertificate", "RootCertificate"] {
+        let value = stored_dict.get(key).and_then(|v| v.as_data())
+            .ok_or_else(|| format!("PairRecord is missing binary field {key}"))?;
+        pair_record.insert(key.into(), plist::Value::Data(value.to_vec()));
+    }
+    for key in ["HostID", "SystemBUID"] {
+        let value = stored_dict.get(key).and_then(|v| v.as_string())
+            .ok_or_else(|| format!("PairRecord is missing string field {key}"))?;
+        pair_record.insert(key.into(), plist::Value::String(value.to_string()));
+    }
+
+    let address: SocketAddr = "127.0.0.1:27015".parse().unwrap();
+    let mut mux = TcpStream::connect_timeout(&address, Duration::from_secs(3))
+        .map_err(|e| format!("Apple USBMUX connect failed: {e}"))?;
+    mux.set_read_timeout(Some(Duration::from_secs(10))).map_err(|e| e.to_string())?;
+    mux.set_write_timeout(Some(Duration::from_secs(5))).map_err(|e| e.to_string())?;
+    write_usbmux_plist(&mut mux, 1, make_usbmux_message("ListDevices"))?;
+    let list = read_usbmux_plist(&mut mux)?;
+    let devices = list.as_dictionary().and_then(|d| d.get("DeviceList")).and_then(|v| v.as_array())
+        .ok_or_else(|| format!("USBMUX ListDevices response has no DeviceList: {list:?}"))?;
+    let attached = devices.iter().any(|entry| {
+        let Some(dict) = entry.as_dictionary() else { return false; };
+        let Some(props) = dict.get("Properties").and_then(|v| v.as_dictionary()) else { return false; };
+        props.get("ConnectionType").and_then(|v| v.as_string()) == Some("USB")
+            && props.get("SerialNumber").and_then(|v| v.as_string()) == Some(prepared.unique_device_id.as_str())
+    });
+    if !attached { return Err("The paired iPhone is not attached over USB".into()); }
+    drop(mux);
+
+    let mut mux = TcpStream::connect_timeout(&address, Duration::from_secs(3))
+        .map_err(|e| format!("Apple USBMUX reconnect failed: {e}"))?;
+    mux.set_read_timeout(Some(Duration::from_secs(15))).map_err(|e| e.to_string())?;
+    mux.set_write_timeout(Some(Duration::from_secs(5))).map_err(|e| e.to_string())?;
+    let mut connect = make_usbmux_message("Connect");
+    let dict = connect.as_dictionary_mut().unwrap();
+    dict.insert("DeviceID".into(), plist::Value::Integer(prepared.device_id.into()));
+    dict.insert("PortNumber".into(), plist::Value::Integer(u16::to_be(62078).into()));
+    write_usbmux_plist(&mut mux, 2, connect)?;
+    let connected = read_usbmux_plist(&mut mux)?;
+    let code = connected.as_dictionary().and_then(|d| d.get("Number")).and_then(|v| v.as_unsigned_integer())
+        .ok_or_else(|| format!("USBMUX Connect response invalid: {connected:?}"))?;
+    if code != 0 { return Err(format!("USBMUX Connect to lockdownd failed: {connected:?}")); }
+
+    let mut request = plist::Dictionary::new();
+    request.insert("Label".into(), plist::Value::String("DiPlay Windows".into()));
+    request.insert("PairRecord".into(), plist::Value::Dictionary(pair_record));
+    request.insert("Request".into(), plist::Value::String("ValidatePair".into()));
+    request.insert("ProtocolVersion".into(), plist::Value::String("2".into()));
+    let response = lockdown_send_receive(&mut mux, plist::Value::Dictionary(request))?;
+    let response_dict = response.as_dictionary()
+        .ok_or_else(|| format!("Lockdown ValidatePair response is not a dictionary: {response:?}"))?;
+    if let Some(error) = response_dict.get("Error").and_then(|v| v.as_string()) {
+        return Err(format!("Lockdown ValidatePair rejected the PairRecord: {error}; response={response:?}"));
+    }
+    if response_dict.get("Request").and_then(|v| v.as_string()) != Some("ValidatePair")
+        || response_dict.get("Result").and_then(|v| v.as_string()) != Some("Success") {
+        return Err(format!("Unexpected ValidatePair response: {response:?}"));
+    }
+
+    Ok(ValidatePairResult {
+        device_id: prepared.device_id,
+        unique_device_id: prepared.unique_device_id,
+        validated: true,
+        escrow_bag_bytes: escrow_bytes,
+        response_preview: format!("{response:?}"),
+        message: "ValidatePair 성공: iPhone이 이 HostID를 신뢰하는 것으로 확인됐습니다.".into(),
     })
 }
 
@@ -1140,6 +1260,10 @@ fn main() {
             "pairing:pair" => match send_lockdown_pair_request() {
                 Ok(result) => print_response("pairing:pair", "ok", None, Some(result)),
                 Err(error) => print_response::<PairingRequestResult>("pairing:pair", "error", Some(error), None),
+            },
+            "pairing:validate" => match validate_lockdown_pairing() {
+                Ok(result) => print_response("pairing:validate", "ok", None, Some(result)),
+                Err(error) => print_response::<ValidatePairResult>("pairing:validate", "error", Some(error), None),
             },
             _ => print_response::<Vec<Device>>("error", "unknown-command", Some("Unknown command".to_string()), None),
         }
