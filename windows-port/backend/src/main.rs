@@ -419,6 +419,147 @@ fn probe_usbmux() -> Result<UsbMuxProbeResult, String> {
     })
 }
 
+
+#[derive(Serialize)]
+struct LockdownProbeResult {
+    connected: bool,
+    device_id: u64,
+    port: u16,
+    lockdown_type: Option<String>,
+    response_preview: String,
+}
+
+fn read_usbmux_plist(stream: &mut std::net::TcpStream) -> Result<plist::Value, String> {
+    use std::io::Read;
+    let mut header = [0u8; 16];
+    stream.read_exact(&mut header)
+        .map_err(|e| format!("USBMUX response header read failed: {e}"))?;
+    let length = u32::from_le_bytes(header[0..4].try_into().unwrap()) as usize;
+    let version = u32::from_le_bytes(header[4..8].try_into().unwrap());
+    let message = u32::from_le_bytes(header[8..12].try_into().unwrap());
+    if length < 16 || length > 1024 * 1024 {
+        return Err(format!("Invalid USBMUX response length: {length}"));
+    }
+    if version != 1 || message != 8 {
+        return Err(format!("Unexpected USBMUX response header: version={version}, message={message}"));
+    }
+    let mut payload = vec![0u8; length - 16];
+    stream.read_exact(&mut payload)
+        .map_err(|e| format!("USBMUX response payload read failed: {e}"))?;
+    plist::from_reader(std::io::Cursor::new(payload))
+        .map_err(|e| format!("USBMUX response plist parse failed: {e}"))
+}
+
+fn write_usbmux_plist(stream: &mut std::net::TcpStream, tag: u32, value: plist::Value) -> Result<(), String> {
+    use std::io::Write;
+    let mut payload = Vec::new();
+    plist::to_writer_xml(&mut payload, &value)
+        .map_err(|e| format!("USBMUX plist serialization failed: {e}"))?;
+    let length = 16usize.checked_add(payload.len())
+        .ok_or_else(|| "USBMUX request length overflow".to_string())?;
+    let mut header = Vec::with_capacity(16);
+    header.extend_from_slice(&(length as u32).to_le_bytes());
+    header.extend_from_slice(&1u32.to_le_bytes());
+    header.extend_from_slice(&8u32.to_le_bytes());
+    header.extend_from_slice(&tag.to_le_bytes());
+    stream.write_all(&header).and_then(|_| stream.write_all(&payload))
+        .map_err(|e| format!("USBMUX request write failed: {e}"))
+}
+
+fn make_usbmux_message(message_type: &str) -> plist::Value {
+    let mut dict = plist::Dictionary::new();
+    dict.insert("BundleID".into(), plist::Value::String("com.diplay.windows".into()));
+    dict.insert("ClientVersionString".into(), plist::Value::String("DiPlay Windows 0.1".into()));
+    dict.insert("MessageType".into(), plist::Value::String(message_type.into()));
+    dict.insert("ProgName".into(), plist::Value::String("DiPlay".into()));
+    dict.insert("kLibUSBMuxVersion".into(), plist::Value::Integer(3.into()));
+    plist::Value::Dictionary(dict)
+}
+
+fn lockdown_query_type() -> Result<LockdownProbeResult, String> {
+    use std::net::{SocketAddr, TcpStream};
+    use std::time::Duration;
+
+    // First ask the Apple usbmux service for the currently attached USB device ID.
+    let address: SocketAddr = "127.0.0.1:27015".parse().unwrap();
+    let mut mux = TcpStream::connect_timeout(&address, Duration::from_secs(3))
+        .map_err(|e| format!("Apple USBMUX connect failed: {e}"))?;
+    mux.set_read_timeout(Some(Duration::from_secs(5))).map_err(|e| e.to_string())?;
+    mux.set_write_timeout(Some(Duration::from_secs(5))).map_err(|e| e.to_string())?;
+    write_usbmux_plist(&mut mux, 1, make_usbmux_message("ListDevices"))?;
+    let list_response = read_usbmux_plist(&mut mux)?;
+    let list_dict = list_response.as_dictionary()
+        .ok_or_else(|| "USBMUX ListDevices response is not a dictionary".to_string())?;
+    let device_list = list_dict.get("DeviceList").and_then(|v| v.as_array())
+        .ok_or_else(|| format!("USBMUX response has no DeviceList: {list_response:?}"))?;
+    let selected = device_list.iter().find_map(|entry| {
+        let entry_dict = entry.as_dictionary()?;
+        let props = entry_dict.get("Properties")?.as_dictionary()?;
+        let connection = props.get("ConnectionType")?.as_string()?;
+        if connection != "USB" { return None; }
+        entry_dict.get("DeviceID").and_then(|v| v.as_unsigned_integer())
+    }).ok_or_else(|| "No USB-connected iPhone was found in DeviceList".to_string())?;
+    drop(mux);
+
+    // Connect to lockdownd on TCP port 62078 through usbmux.
+    let mut mux = TcpStream::connect_timeout(&address, Duration::from_secs(3))
+        .map_err(|e| format!("Apple USBMUX reconnect failed: {e}"))?;
+    mux.set_read_timeout(Some(Duration::from_secs(7))).map_err(|e| e.to_string())?;
+    mux.set_write_timeout(Some(Duration::from_secs(5))).map_err(|e| e.to_string())?;
+    let mut connect_request = make_usbmux_message("Connect");
+    let connect_dict = connect_request.as_dictionary_mut().unwrap();
+    connect_dict.insert("DeviceID".into(), plist::Value::Integer(selected.into()));
+    // libusbmuxd encodes PortNumber with htons() in the plist integer.
+    connect_dict.insert("PortNumber".into(), plist::Value::Integer(u16::to_be(62078).into()));
+    write_usbmux_plist(&mut mux, 2, connect_request)?;
+
+    let connect_response = read_usbmux_plist(&mut mux)?;
+    let response_dict = connect_response.as_dictionary()
+        .ok_or_else(|| format!("USBMUX Connect response is not a dictionary: {connect_response:?}"))?;
+    let result = response_dict.get("Number").and_then(|v| v.as_unsigned_integer())
+        .ok_or_else(|| format!("USBMUX Connect response has no result number: {connect_response:?}"))?;
+    if result != 0 {
+        return Err(format!("USBMUX Connect to device {selected} port 62078 failed with result {result}: {connect_response:?}"));
+    }
+
+    // Lockdown uses a 4-byte big-endian length followed by an XML plist.
+    let mut query = plist::Dictionary::new();
+    query.insert("Label".into(), plist::Value::String("DiPlay Windows".into()));
+    query.insert("Request".into(), plist::Value::String("QueryType".into()));
+    let mut query_payload = Vec::new();
+    plist::to_writer_xml(&mut query_payload, &plist::Value::Dictionary(query))
+        .map_err(|e| format!("Lockdown QueryType plist serialization failed: {e}"))?;
+    let query_len = u32::try_from(query_payload.len())
+        .map_err(|_| "Lockdown request is too large".to_string())?;
+    mux.write_all(&query_len.to_be_bytes()).and_then(|_| mux.write_all(&query_payload))
+        .map_err(|e| format!("Lockdown QueryType request write failed: {e}"))?;
+
+    use std::io::Read;
+    let mut length_bytes = [0u8; 4];
+    mux.read_exact(&mut length_bytes)
+        .map_err(|e| format!("Lockdown response length read failed: {e}"))?;
+    let response_len = u32::from_be_bytes(length_bytes) as usize;
+    if response_len == 0 || response_len > 1024 * 1024 {
+        return Err(format!("Invalid Lockdown response length: {response_len}"));
+    }
+    let mut response_payload = vec![0u8; response_len];
+    mux.read_exact(&mut response_payload)
+        .map_err(|e| format!("Lockdown response body read failed: {e}"))?;
+    let response: plist::Value = plist::from_reader(std::io::Cursor::new(&response_payload))
+        .map_err(|e| format!("Lockdown response plist parse failed: {e}; payload={}", String::from_utf8_lossy(&response_payload)))?;
+    let response_dict = response.as_dictionary()
+        .ok_or_else(|| format!("Lockdown response is not a dictionary: {response:?}"))?;
+    let lockdown_type = response_dict.get("Type").and_then(|v| v.as_string()).map(str::to_owned);
+
+    Ok(LockdownProbeResult {
+        connected: true,
+        device_id: selected,
+        port: 62078,
+        lockdown_type,
+        response_preview: format!("{response:?}"),
+    })
+}
+
 fn print_response<T: Serialize>(event: &'static str, status: &'static str, message: Option<String>, devices: Option<T>) {
     let response = Response { event, status, message, devices };
     if let Ok(json) = serde_json::to_string(&response) { println!("{json}"); }
@@ -441,6 +582,10 @@ fn main() {
             "usbmux:probe" => match probe_usbmux() {
                 Ok(result) => print_response("usbmux:probe", "ok", None, Some(result)),
                 Err(error) => print_response::<UsbMuxProbeResult>("usbmux:probe", "error", Some(error), None),
+            },
+            "lockdown:query-type" => match lockdown_query_type() {
+                Ok(result) => print_response("lockdown:query-type", "ok", None, Some(result)),
+                Err(error) => print_response::<LockdownProbeResult>("lockdown:query-type", "error", Some(error), None),
             },
             _ => print_response::<Vec<Device>>("error", "unknown-command", Some("Unknown command".to_string()), None),
         }
