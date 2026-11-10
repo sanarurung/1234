@@ -336,6 +336,89 @@ fn inspect_winusb_interfaces() -> Result<InspectionResult, String> {
     Err("WinUSB inspection is currently supported on Windows only.".to_string())
 }
 
+
+#[derive(Serialize)]
+struct UsbMuxProbeResult {
+    connected: bool,
+    response_message: Option<String>,
+    result_number: Option<u64>,
+    device_count: Option<usize>,
+    response_preview: String,
+}
+
+fn probe_usbmux() -> Result<UsbMuxProbeResult, String> {
+    use std::io::{Read, Write};
+    use std::net::{SocketAddr, TcpStream};
+    use std::time::Duration;
+
+    let address: SocketAddr = "127.0.0.1:27015".parse().unwrap();
+    let mut stream = TcpStream::connect_timeout(&address, Duration::from_secs(3))
+        .map_err(|e| format!("Apple USBMUX TCP connect failed: {e}"))?;
+    stream.set_read_timeout(Some(Duration::from_secs(5)))
+        .map_err(|e| format!("Set read timeout failed: {e}"))?;
+    stream.set_write_timeout(Some(Duration::from_secs(5)))
+        .map_err(|e| format!("Set write timeout failed: {e}"))?;
+
+    // libusbmuxd protocol v1: MESSAGE_PLIST (8), XML plist payload.
+    let mut request = plist::Dictionary::new();
+    request.insert("BundleID".into(), plist::Value::String("com.diplay.windows".into()));
+    request.insert("ClientVersionString".into(), plist::Value::String("DiPlay Windows 0.1".into()));
+    request.insert("MessageType".into(), plist::Value::String("ListDevices".into()));
+    request.insert("ProgName".into(), plist::Value::String("DiPlay".into()));
+    request.insert("kLibUSBMuxVersion".into(), plist::Value::Integer(3.into()));
+
+    let mut payload = Vec::new();
+    plist::to_writer_xml(&mut payload, &plist::Value::Dictionary(request))
+        .map_err(|e| format!("USBMUX plist serialization failed: {e}"))?;
+
+    let total_len = 16usize.checked_add(payload.len())
+        .ok_or_else(|| "USBMUX request length overflow".to_string())?;
+    let mut header = Vec::with_capacity(16);
+    header.extend_from_slice(&(total_len as u32).to_le_bytes());
+    header.extend_from_slice(&1u32.to_le_bytes()); // plist protocol
+    header.extend_from_slice(&8u32.to_le_bytes()); // MESSAGE_PLIST
+    header.extend_from_slice(&1u32.to_le_bytes()); // tag
+    stream.write_all(&header).and_then(|_| stream.write_all(&payload))
+        .map_err(|e| format!("USBMUX ListDevices send failed: {e}"))?;
+
+    let mut response_header = [0u8; 16];
+    stream.read_exact(&mut response_header)
+        .map_err(|e| format!("USBMUX response header read failed: {e}"))?;
+    let response_len = u32::from_le_bytes(response_header[0..4].try_into().unwrap()) as usize;
+    let response_version = u32::from_le_bytes(response_header[4..8].try_into().unwrap());
+    let response_type = u32::from_le_bytes(response_header[8..12].try_into().unwrap());
+    let response_tag = u32::from_le_bytes(response_header[12..16].try_into().unwrap());
+    if response_len < 16 || response_len > 1024 * 1024 {
+        return Err(format!("Invalid USBMUX response length: {response_len}"));
+    }
+    let mut response_payload = vec![0u8; response_len - 16];
+    stream.read_exact(&mut response_payload)
+        .map_err(|e| format!("USBMUX response payload read failed: {e}"))?;
+
+    if response_type != 8 {
+        return Err(format!(
+            "USBMUX returned non-plist packet: type={response_type}, version={response_version}, tag={response_tag}, payload={} bytes",
+            response_payload.len()
+        ));
+    }
+
+    let value: plist::Value = plist::from_reader(std::io::Cursor::new(&response_payload))
+        .map_err(|e| format!("USBMUX response plist parse failed: {e}; payload={}", String::from_utf8_lossy(&response_payload)))?;
+    let dict = value.as_dictionary()
+        .ok_or_else(|| format!("USBMUX response is not a plist dictionary: {value:?}"))?;
+    let response_message = dict.get("MessageType").and_then(|v| v.as_string()).map(str::to_owned);
+    let result_number = dict.get("Number").and_then(|v| v.as_unsigned_integer());
+    let device_count = dict.get("DeviceList").and_then(|v| v.as_array()).map(|v| v.len());
+
+    Ok(UsbMuxProbeResult {
+        connected: true,
+        response_message,
+        result_number,
+        device_count,
+        response_preview: format!("{value:?}"),
+    })
+}
+
 fn print_response<T: Serialize>(event: &'static str, status: &'static str, message: Option<String>, devices: Option<T>) {
     let response = Response { event, status, message, devices };
     if let Ok(json) = serde_json::to_string(&response) { println!("{json}"); }
@@ -354,6 +437,10 @@ fn main() {
             "usb:inspect" => match inspect_winusb_interfaces() {
                 Ok(result) => print_response("usb:inspect", "ok", None, Some(result)),
                 Err(error) => print_response::<InspectionResult>("usb:inspect", "error", Some(error), None),
+            },
+            "usbmux:probe" => match probe_usbmux() {
+                Ok(result) => print_response("usbmux:probe", "ok", None, Some(result)),
+                Err(error) => print_response::<UsbMuxProbeResult>("usbmux:probe", "error", Some(error), None),
             },
             _ => print_response::<Vec<Device>>("error", "unknown-command", Some("Unknown command".to_string()), None),
         }
