@@ -21,6 +21,8 @@ function App() {
   const [requestingPairing, setRequestingPairing] = useState(false);
   const [pairValidation, setPairValidation] = useState(null);
   const [validatingPair, setValidatingPair] = useState(false);
+  const [pairValidation, setPairValidation] = useState(null);
+  const [validatingPair, setValidatingPair] = useState(false);
 
   const refreshStatus = useCallback(() => {
     window.diPlay.getStatus().then(setStatus).catch((err) => setError(String(err)));
@@ -130,6 +132,20 @@ function App() {
     }
   };
 
+  const validatePairing = async () => {
+    setValidatingPair(true);
+    setError("");
+    try {
+      const result = await window.diPlay.validatePairing();
+      if (result.status !== "ok") throw new Error(result.message || "ValidatePair 확인에 실패했습니다.");
+      setPairValidation(result.devices);
+    } catch (err) {
+      setError(err.message || String(err));
+    } finally {
+      setValidatingPair(false);
+    }
+  };
+
   const scanUsb = async () => {
     setLoading(true);
     setError("");
@@ -202,6 +218,19 @@ function App() {
       <div><div className="panel-label">LOCKDOWN PAIR REQUEST</div><div className="state">저장된 PairRecord를 사용해 iPhone에 실제 신뢰 요청 전송</div></div>
       <button className="scan-button" onClick={requestPairing} disabled={requestingPairing || status?.backend !== "ready"}>{requestingPairing ? "Pair 요청 중..." : "iPhone 신뢰 요청 보내기"}</button>
     </section>
+    <section className="panel scan-panel">
+      <div><div className="panel-label">LOCKDOWN VALIDATE PAIR</div><div className="state">PairRecord + HostID를 iPhone에 제시해 신뢰 상태 확인</div></div>
+      <button className="scan-button" onClick={validatePairing} disabled={validatingPair || status?.backend !== "ready"}>{validatingPair ? "신뢰 상태 확인 중..." : "ValidatePair 신뢰 확인"}</button>
+    </section>
+    {pairValidation && <section className="results">
+      <div className="results-heading"><h2>ValidatePair 결과</h2><span>{pairValidation.validated ? "검증 성공" : "확인 필요"}</span></div>
+      <article className="device"><div className="device-info">
+        <strong>DeviceID: {pairValidation.device_id} · {pairValidation.unique_device_id}</strong>
+        <span>{pairValidation.message}</span>
+        <small>EscrowBag: {pairValidation.escrow_bag_bytes} bytes</small>
+        <small>{pairValidation.response_preview}</small>
+      </div></article>
+    </section>}
     <section className="panel scan-panel">
       <div><div className="panel-label">LOCKDOWN VALIDATE PAIR</div><div className="state">PairRecord + HostID를 iPhone에 제시해 신뢰 상태 확인</div></div>
       <button className="scan-button" onClick={validatePairing} disabled={validatingPair || status?.backend !== "ready"}>{validatingPair ? "신뢰 상태 확인 중..." : "ValidatePair 신뢰 확인"}</button>
