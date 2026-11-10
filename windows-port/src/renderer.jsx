@@ -13,6 +13,8 @@ function App() {
   const [probingMux, setProbingMux] = useState(false);
   const [lockdownResult, setLockdownResult] = useState(null);
   const [queryingLockdown, setQueryingLockdown] = useState(false);
+  const [pairingPreflight, setPairingPreflight] = useState(null);
+  const [checkingPairing, setCheckingPairing] = useState(false);
 
   const refreshStatus = useCallback(() => {
     window.diPlay.getStatus().then(setStatus).catch((err) => setError(String(err)));
@@ -57,6 +59,21 @@ function App() {
       setError(err.message || String(err));
     } finally {
       setQueryingLockdown(false);
+    }
+  };
+
+
+  const checkPairingPreflight = async () => {
+    setCheckingPairing(true);
+    setError("");
+    try {
+      const result = await window.diPlay.pairingPreflight();
+      if (result.status !== "ok") throw new Error(result.message || "Pairing 사전 점검에 실패했습니다.");
+      setPairingPreflight(result.devices);
+    } catch (err) {
+      setError(err.message || String(err));
+    } finally {
+      setCheckingPairing(false);
     }
   };
 
@@ -110,6 +127,19 @@ function App() {
       <div><div className="panel-label">LOCKDOWN SERVICE</div><div className="state">USBMUX Connect → iPhone TCP 62078 → QueryType</div></div>
       <button className="scan-button" onClick={queryLockdown} disabled={queryingLockdown || status?.backend !== "ready"}>{queryingLockdown ? "연결 확인 중..." : "Lockdown 서비스 연결 테스트"}</button>
     </section>
+
+    <section className="panel scan-panel">
+      <div><div className="panel-label">LOCKDOWN PAIRING PREFLIGHT</div><div className="state">GetValue → UniqueDeviceID / DeviceName / ProductVersion / DevicePublicKey</div></div>
+      <button className="scan-button" onClick={checkPairingPreflight} disabled={checkingPairing || status?.backend !== "ready"}>{checkingPairing ? "사전 점검 중..." : "Pairing 사전 점검"}</button>
+    </section>
+    {pairingPreflight && <section className="results">
+      <div className="results-heading"><h2>Pairing 사전 점검</h2><span>{pairingPreflight.has_device_public_key ? "준비 완료" : "확인 필요"}</span></div>
+      <article className="device"><div className="device-info">
+        <strong>{pairingPreflight.device_name || "iPhone"} · iOS {pairingPreflight.product_version || "버전 확인 불가"}</strong>
+        <span>DeviceID: {pairingPreflight.device_id} · DevicePublicKey: {pairingPreflight.device_public_key_bytes ?? 0} bytes</span>
+        <small>UDID: {pairingPreflight.unique_device_id || "응답 없음"}</small>
+      </div></article>
+    </section>}
     {lockdownResult && <section className="results">
       <div className="results-heading"><h2>Lockdown 연결 결과</h2><span>{lockdownResult.connected ? "연결 성공" : "연결 실패"}</span></div>
       <article className="device"><div className="device-info">
