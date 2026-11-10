@@ -257,7 +257,7 @@ function App() {
         <div className="device-icon">SVC</div>
         <div className="device-info">
           <strong>{item.identifier}</strong>
-          <span>{item.available ? "StartService 성공 · Port " + item.port + " · SSL " + String(item.ssl_enabled) : "사용 불가 또는 시작 거부"}</span>
+          <span>{item.available ? "StartService 성공 · Port " + item.port + " · SSL " + String(item.ssl_enabled) + " · TLS " + (item.tls_established === true ? "성공" : item.tls_established === false ? "실패" : "미실행") : "사용 불가 또는 시작 거부"}</span>
           {item.error && <small>{item.error}</small>}
         </div>
       </article>)}
