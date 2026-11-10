@@ -1,3 +1,5 @@
+mod apple_mux;
+
 use serde::Serialize;
 use std::io::{self, BufRead, Write};
 use windows_sys::Win32::Devices::DeviceAndDriverInstallation::{
@@ -1694,6 +1696,14 @@ fn main() {
             "usb:inspect" => match inspect_winusb_interfaces() {
                 Ok(result) => print_response("usb:inspect", "ok", None, Some(result)),
                 Err(error) => print_response::<InspectionResult>("usb:inspect", "error", Some(error), None),
+            },
+            "apple-mux:descriptor" => match apple_mux::read_descriptor() {
+                Ok(result) => print_response("apple-mux:descriptor", "ok", None, Some(result)),
+                Err(error) => print_response::<apple_mux::AppleMuxDescriptorResult>("apple-mux:descriptor", "error", Some(error), None),
+            },
+            "apple-mux:request-carplay-mode" => match apple_mux::request_carplay_mode() {
+                Ok(result) => print_response("apple-mux:request-carplay-mode", "ok", None, Some(result)),
+                Err(error) => print_response::<apple_mux::AppleMuxModeRequestResult>("apple-mux:request-carplay-mode", "error", Some(error), None),
             },
             "usbmux:probe" => match probe_usbmux() {
                 Ok(result) => print_response("usbmux:probe", "ok", None, Some(result)),
