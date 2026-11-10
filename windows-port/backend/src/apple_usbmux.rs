@@ -35,7 +35,7 @@ mod platform {
             INVALID_HANDLE_VALUE, ERROR_NO_MORE_ITEMS,
         },
         Storage::FileSystem::{
-            CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+            CreateFileW, FILE_FLAG_OVERLAPPED, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
         },
     };
 
@@ -200,7 +200,7 @@ mod platform {
                 CreateFileW(
                     path_wide.as_ptr(), GENERIC_READ | GENERIC_WRITE,
                     FILE_SHARE_READ | FILE_SHARE_WRITE, ptr::null(),
-                    OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, ptr::null_mut(),
+                    OPEN_EXISTING, FILE_FLAG_OVERLAPPED, ptr::null_mut(),
                 )
             };
             if handle != INVALID_HANDLE_VALUE {
