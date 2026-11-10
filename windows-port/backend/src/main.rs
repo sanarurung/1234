@@ -268,15 +268,33 @@ fn inspect_winusb_interfaces() -> Result<InspectionResult, String> {
         let device_path = String::from_utf16_lossy(&path_words[..path_len]);
         let path_wide = wide(&device_path);
 
-        let device_handle = unsafe {
-            CreateFileW(
-                path_wide.as_ptr(), GENERIC_READ | GENERIC_WRITE,
-                FILE_SHARE_READ | FILE_SHARE_WRITE, std::ptr::null(),
-                OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED, std::ptr::null_mut()
-            )
-        };
+        // Probe conservative CreateFileW combinations without changing the device or driver.
+        // A successful handle is then passed to WinUsb_Initialize; each failed attempt is retained.
+        let attempts: [(&str, u32, u32, u32); 4] = [
+            ("access=0 share=RW sync", 0, FILE_SHARE_READ | FILE_SHARE_WRITE, FILE_ATTRIBUTE_NORMAL),
+            ("read share=RW sync", GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, FILE_ATTRIBUTE_NORMAL),
+            ("read-write share=RW sync", GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, FILE_ATTRIBUTE_NORMAL),
+            ("read-write share=RW overlapped", GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED),
+        ];
+        let mut opened = INVALID_HANDLE_VALUE;
+        let mut open_errors = Vec::new();
+        for (label, access, share, flags) in attempts {
+            let handle = unsafe {
+                CreateFileW(
+                    path_wide.as_ptr(), access, share, std::ptr::null(),
+                    OPEN_EXISTING, flags, std::ptr::null_mut()
+                )
+            };
+            if handle != INVALID_HANDLE_VALUE {
+                diagnostics.push(format!("Interface #{index}: CreateFileW succeeded ({label})"));
+                opened = handle;
+                break;
+            }
+            open_errors.push(format!("{label} -> Win32 {}", unsafe { GetLastError() }));
+        }
+        let device_handle = opened;
         if device_handle == INVALID_HANDLE_VALUE {
-            diagnostics.push(format!("Interface #{index}: CreateFileW failed (Win32 error {}). DevicePath={}", unsafe { GetLastError() }, device_path));
+            diagnostics.push(format!("Interface #{index}: all CreateFileW attempts failed: {}. DevicePath={}", open_errors.join("; "), device_path));
             continue;
         }
 
