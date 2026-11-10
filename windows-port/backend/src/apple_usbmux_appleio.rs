@@ -327,7 +327,7 @@ mod platform {
                 // Android sends protocol 2 / payload 0x07 after VERSION is accepted.
                 let mut setup_request = [0u8; USBMUX_HEADER_SIZE + 1];
                 setup_request[0..4].copy_from_slice(&USBMUX_SETUP_PROTOCOL.to_be_bytes());
-                setup_request[4..8].copy_from_slice(&(setup_request.len() as u32).to_be_bytes());
+                setup_request[4..8].copy_from_slice(&((USBMUX_HEADER_SIZE as u32) + 1).to_be_bytes());
                 setup_request[8..12].copy_from_slice(&USBMUX_MAGIC.to_be_bytes());
                 setup_request[USBMUX_HEADER_SIZE] = USBMUX_SETUP_VALUE;
                 let setup_len = setup_request.len() as u32;
