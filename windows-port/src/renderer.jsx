@@ -17,6 +17,8 @@ function App() {
   const [preparingPairing, setPreparingPairing] = useState(false);
   const [pairingPreflight, setPairingPreflight] = useState(null);
   const [checkingPairing, setCheckingPairing] = useState(false);
+  const [pairingRequest, setPairingRequest] = useState(null);
+  const [requestingPairing, setRequestingPairing] = useState(false);
 
   const refreshStatus = useCallback(() => {
     window.diPlay.getStatus().then(setStatus).catch((err) => setError(String(err)));
@@ -94,6 +96,24 @@ function App() {
     }
   };
 
+  const requestPairing = async () => {
+    const approved = window.confirm(
+      "실제 iPhone Lockdown Pair 요청을 보냅니다. iPhone에 이 컴퓨터를 신뢰할지 묻는 창이 나타날 수 있습니다. 계속할까요?"
+    );
+    if (!approved) return;
+    setRequestingPairing(true);
+    setError("");
+    try {
+      const result = await window.diPlay.requestPairing();
+      if (result.status !== "ok") throw new Error(result.message || "Lockdown Pair 요청에 실패했습니다.");
+      setPairingRequest(result.devices);
+    } catch (err) {
+      setError(err.message || String(err));
+    } finally {
+      setRequestingPairing(false);
+    }
+  };
+
   const scanUsb = async () => {
     setLoading(true);
     setError("");
@@ -162,6 +182,18 @@ function App() {
       <div><div className="panel-label">PAIRING MATERIAL GENERATION</div><div className="state">iPhone 공개 키 기반 인증서 생성 · Windows DPAPI 보호 저장</div></div>
       <button className="scan-button" onClick={preparePairing} disabled={preparingPairing || status?.backend !== "ready"}>{preparingPairing ? "인증서 생성 중..." : "Pairing 인증서 준비"}</button>
     </section>
+    <section className="panel scan-panel">
+      <div><div className="panel-label">LOCKDOWN PAIR REQUEST</div><div className="state">저장된 PairRecord를 사용해 iPhone에 실제 신뢰 요청 전송</div></div>
+      <button className="scan-button" onClick={requestPairing} disabled={requestingPairing || status?.backend !== "ready"}>{requestingPairing ? "Pair 요청 중..." : "iPhone 신뢰 요청 보내기"}</button>
+    </section>
+    {pairingRequest && <section className="results">
+      <div className="results-heading"><h2>Lockdown Pair 결과</h2><span>{pairingRequest.pairing_state}</span></div>
+      <article className="device"><div className="device-info">
+        <strong>DeviceID: {pairingRequest.device_id} · {pairingRequest.unique_device_id}</strong>
+        <span>{pairingRequest.message}</span>
+        <small>{pairingRequest.response_preview}</small>
+      </div></article>
+    </section>}
     {pairingMaterial && <section className="results">
       <div className="results-heading"><h2>Pairing 인증서 준비 결과</h2><span>{pairingMaterial.prepared ? "준비 완료" : "실패"}</span></div>
       <article className="device"><div className="device-info">
