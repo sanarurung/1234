@@ -193,7 +193,7 @@ fn inspect_winusb_interfaces() -> Result<InspectionResult, String> {
     };
     use windows_sys::Win32::Foundation::{CloseHandle, GENERIC_READ, GENERIC_WRITE, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::Storage::FileSystem::{
-        CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+        CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_FLAG_OVERLAPPED, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
     };
 
     // DeviceInterfaceGUIDs from the installed AppleUsbMux INF (oem19.inf).
@@ -260,7 +260,7 @@ fn inspect_winusb_interfaces() -> Result<InspectionResult, String> {
             CreateFileW(
                 path_wide.as_ptr(), GENERIC_READ | GENERIC_WRITE,
                 FILE_SHARE_READ | FILE_SHARE_WRITE, std::ptr::null(),
-                OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, std::ptr::null_mut()
+                OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED, std::ptr::null_mut()
             )
         };
         if device_handle == INVALID_HANDLE_VALUE {
