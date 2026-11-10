@@ -1552,7 +1552,7 @@ fn discover_lockdown_services() -> Result<ServiceDiscoveryResult, String> {
     context.set_certificate(&host_cert).map_err(|e| format!("Cannot load HostCertificate: {e}"))?;
     context.set_private_key(&host_key).map_err(|e| format!("Cannot load HostPrivateKey: {e}"))?;
     context.check_private_key().map_err(|e| format!("Host certificate/key mismatch: {e}"))?;
-    context.cert_store_mut().add_cert(root_cert).map_err(|e| format!("Cannot add RootCertificate: {e}"))?;
+    context.cert_store_mut().add_cert(root_cert.clone()).map_err(|e| format!("Cannot add RootCertificate: {e}"))?;
     context.set_verify(SslVerifyMode::PEER);
     let context = context.build();
     let mut ssl = Ssl::new(&context).map_err(|e| format!("TLS session creation failed: {e}"))?;
