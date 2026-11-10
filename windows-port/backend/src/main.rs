@@ -1335,7 +1335,8 @@ fn start_lockdown_session() -> Result<StartSessionResult, String> {
             .map_err(|e| format!("Cannot add RootCertificate to TLS trust store: {e}"))?;
         context.set_verify(SslVerifyMode::PEER);
         let context = context.build();
-        let ssl = Ssl::new(&context).map_err(|e| format!("TLS session creation failed: {e}"))?;
+        let mut ssl = Ssl::new(&context).map_err(|e| format!("TLS session creation failed: {e}"))?;
+        ssl.set_connect_state();
         let mut tls = SslStream::new(ssl, mux)
             .map_err(|e| format!("TLS stream creation failed: {e}"))?;
         tls.connect().map_err(|e| format!("Lockdown TLS handshake failed: {e}"))?;
