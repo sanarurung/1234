@@ -1152,17 +1152,12 @@ fn validate_lockdown_pairing() -> Result<ValidatePairResult, String> {
         .map(|v| v.len())
         .ok_or("PairRecord has no EscrowBag. Run the Pair request and approve it on the iPhone first.")?;
 
-    let mut pair_record = plist::Dictionary::new();
-    for key in ["DeviceCertificate", "HostCertificate", "RootCertificate"] {
-        let value = stored_dict.get(key).and_then(|v| v.as_data())
-            .ok_or_else(|| format!("PairRecord is missing binary field {key}"))?;
-        pair_record.insert(key.into(), plist::Value::Data(value.to_vec()));
-    }
-    for key in ["HostID", "SystemBUID"] {
-        let value = stored_dict.get(key).and_then(|v| v.as_string())
-            .ok_or_else(|| format!("PairRecord is missing string field {key}"))?;
-        pair_record.insert(key.into(), plist::Value::String(value.to_string()));
-    }
+    // Match libimobiledevice: send the complete stored public PairRecord,
+    // retaining EscrowBag and any device-specific public fields. Only local
+    // private keys must be excluded from the request.
+    let mut pair_record = stored_dict.clone();
+    pair_record.remove("HostPrivateKey");
+    pair_record.remove("RootPrivateKey");
 
     let address: SocketAddr = "127.0.0.1:27015".parse().unwrap();
     let mut mux = TcpStream::connect_timeout(&address, Duration::from_secs(3))
