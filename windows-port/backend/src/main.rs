@@ -560,6 +560,94 @@ fn lockdown_query_type() -> Result<LockdownProbeResult, String> {
     })
 }
 
+
+#[derive(Serialize)]
+struct PairingPreflightResult {
+    connected: bool,
+    device_id: u64,
+    unique_device_id: Option<String>,
+    device_name: Option<String>,
+    product_version: Option<String>,
+    device_public_key_bytes: Option<usize>,
+    has_device_public_key: bool,
+}
+
+fn lockdown_send_receive(stream: &mut std::net::TcpStream, request: plist::Value) -> Result<plist::Value, String> {
+    use std::io::{Read, Write};
+    let mut payload = Vec::new();
+    plist::to_writer_xml(&mut payload, &request).map_err(|e| format!("Lockdown plist serialization failed: {e}"))?;
+    let length = u32::try_from(payload.len()).map_err(|_| "Lockdown request is too large".to_string())?;
+    stream.write_all(&length.to_be_bytes()).and_then(|_| stream.write_all(&payload))
+        .map_err(|e| format!("Lockdown request write failed: {e}"))?;
+    let mut length_bytes = [0u8; 4];
+    stream.read_exact(&mut length_bytes).map_err(|e| format!("Lockdown response length read failed: {e}"))?;
+    let response_len = u32::from_be_bytes(length_bytes) as usize;
+    if response_len == 0 || response_len > 1024 * 1024 { return Err(format!("Invalid Lockdown response length: {response_len}")); }
+    let mut response_payload = vec![0u8; response_len];
+    stream.read_exact(&mut response_payload).map_err(|e| format!("Lockdown response body read failed: {e}"))?;
+    plist::from_reader(std::io::Cursor::new(response_payload)).map_err(|e| format!("Lockdown response plist parse failed: {e}"))
+}
+
+fn lockdown_get_value(stream: &mut std::net::TcpStream, key: &str) -> Result<plist::Value, String> {
+    let mut request = plist::Dictionary::new();
+    request.insert("Label".into(), plist::Value::String("DiPlay Windows".into()));
+    request.insert("Request".into(), plist::Value::String("GetValue".into()));
+    request.insert("Key".into(), plist::Value::String(key.into()));
+    let response = lockdown_send_receive(stream, plist::Value::Dictionary(request))?;
+    let dict = response.as_dictionary().ok_or_else(|| format!("GetValue({key}) response is not a dictionary: {response:?}"))?;
+    if let Some(error) = dict.get("Error").and_then(|v| v.as_string()) { return Err(format!("Lockdown GetValue({key}) rejected: {error}")); }
+    dict.get("Value").cloned().ok_or_else(|| format!("Lockdown GetValue({key}) response has no Value: {response:?}"))
+}
+
+fn lockdown_pairing_preflight() -> Result<PairingPreflightResult, String> {
+    use std::net::{SocketAddr, TcpStream};
+    use std::time::Duration;
+    let address: SocketAddr = "127.0.0.1:27015".parse().unwrap();
+    let mut mux = TcpStream::connect_timeout(&address, Duration::from_secs(3)).map_err(|e| format!("Apple USBMUX connect failed: {e}"))?;
+    mux.set_read_timeout(Some(Duration::from_secs(5))).map_err(|e| e.to_string())?;
+    mux.set_write_timeout(Some(Duration::from_secs(5))).map_err(|e| e.to_string())?;
+    write_usbmux_plist(&mut mux, 1, make_usbmux_message("ListDevices"))?;
+    let list = read_usbmux_plist(&mut mux)?;
+    let list_dict = list.as_dictionary().ok_or_else(|| "USBMUX ListDevices response is not a dictionary".to_string())?;
+    let devices = list_dict.get("DeviceList").and_then(|v| v.as_array()).ok_or_else(|| format!("USBMUX response has no DeviceList: {list:?}"))?;
+    let selected = devices.iter().find_map(|entry| {
+        let dict = entry.as_dictionary()?;
+        let props = dict.get("Properties")?.as_dictionary()?;
+        if props.get("ConnectionType")?.as_string()? != "USB" { return None; }
+        dict.get("DeviceID")?.as_unsigned_integer()
+    }).ok_or_else(|| "No USB-connected iPhone was found".to_string())?;
+    drop(mux);
+
+    let mut mux = TcpStream::connect_timeout(&address, Duration::from_secs(3)).map_err(|e| format!("Apple USBMUX reconnect failed: {e}"))?;
+    mux.set_read_timeout(Some(Duration::from_secs(7))).map_err(|e| e.to_string())?;
+    mux.set_write_timeout(Some(Duration::from_secs(5))).map_err(|e| e.to_string())?;
+    let mut connect = make_usbmux_message("Connect");
+    let connect_dict = connect.as_dictionary_mut().unwrap();
+    connect_dict.insert("DeviceID".into(), plist::Value::Integer(selected.into()));
+    connect_dict.insert("PortNumber".into(), plist::Value::Integer(u16::to_be(62078).into()));
+    write_usbmux_plist(&mut mux, 2, connect)?;
+    let connected = read_usbmux_plist(&mut mux)?;
+    let result = connected.as_dictionary().and_then(|d| d.get("Number")).and_then(|v| v.as_unsigned_integer())
+        .ok_or_else(|| format!("USBMUX Connect response is invalid: {connected:?}"))?;
+    if result != 0 { return Err(format!("USBMUX Connect to lockdownd failed with result {result}")); }
+
+    let mut query = plist::Dictionary::new();
+    query.insert("Label".into(), plist::Value::String("DiPlay Windows".into()));
+    query.insert("Request".into(), plist::Value::String("QueryType".into()));
+    let query_response = lockdown_send_receive(&mut mux, plist::Value::Dictionary(query))?;
+    let lockdown_type = query_response.as_dictionary().and_then(|d| d.get("Type")).and_then(|v| v.as_string());
+    if lockdown_type != Some("com.apple.mobile.lockdown") { return Err(format!("Unexpected Lockdown QueryType response: {query_response:?}")); }
+
+    let udid = lockdown_get_value(&mut mux, "UniqueDeviceID")?.as_string().map(str::to_owned);
+    let name = lockdown_get_value(&mut mux, "DeviceName")?.as_string().map(str::to_owned);
+    let version = lockdown_get_value(&mut mux, "ProductVersion")?.as_string().map(str::to_owned);
+    let public_key = lockdown_get_value(&mut mux, "DevicePublicKey")?;
+    let public_key_bytes = public_key.as_data().map(|data| data.len());
+    if public_key_bytes.unwrap_or(0) == 0 { return Err(format!("DevicePublicKey was not returned as non-empty plist data: {public_key:?}")); }
+
+    Ok(PairingPreflightResult { connected: true, device_id: selected, unique_device_id: udid, device_name: name, product_version: version, device_public_key_bytes: public_key_bytes, has_device_public_key: true })
+}
+
 fn print_response<T: Serialize>(event: &'static str, status: &'static str, message: Option<String>, devices: Option<T>) {
     let response = Response { event, status, message, devices };
     if let Ok(json) = serde_json::to_string(&response) { println!("{json}"); }
@@ -586,6 +674,10 @@ fn main() {
             "lockdown:query-type" => match lockdown_query_type() {
                 Ok(result) => print_response("lockdown:query-type", "ok", None, Some(result)),
                 Err(error) => print_response::<LockdownProbeResult>("lockdown:query-type", "error", Some(error), None),
+            },
+            "lockdown:pairing-preflight" => match lockdown_pairing_preflight() {
+                Ok(result) => print_response("lockdown:pairing-preflight", "ok", None, Some(result)),
+                Err(error) => print_response::<PairingPreflightResult>("lockdown:pairing-preflight", "error", Some(error), None),
             },
             _ => print_response::<Vec<Device>>("error", "unknown-command", Some("Unknown command".to_string()), None),
         }
