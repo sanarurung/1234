@@ -85,6 +85,7 @@ ipcMain.handle("usb:list", async () => sendBackendCommand("usb:list"));
 ipcMain.handle("usb:inspect", async () => sendBackendCommand("usb:inspect"));
 ipcMain.handle("usbmux:probe", async () => sendBackendCommand("usbmux:probe"));
 ipcMain.handle("lockdown:query-type", async () => sendBackendCommand("lockdown:query-type"));
+ipcMain.handle("lockdown:pairing-preflight", async () => sendBackendCommand("lockdown:pairing-preflight"));
 
 app.whenReady().then(() => {
   startBackend();
