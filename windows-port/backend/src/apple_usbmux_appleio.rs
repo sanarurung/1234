@@ -49,7 +49,7 @@ mod platform {
     const USBMUX_VERSION: u32 = 0;
     const USBMUX_VERSION_REQUEST_SIZE: usize = 20;
     const MAX_REPLY: usize = 0x8000;
-    const IO_TIMEOUT_MS: u32 = 5000;
+    const IO_TIMEOUT_MS: u32 = 15000;
     const WAIT_OBJECT_0: u32 = 0;
     const WAIT_TIMEOUT: u32 = 258;
 
@@ -236,13 +236,19 @@ mod platform {
                 version_request[8..12].copy_from_slice(&2u32.to_be_bytes());
 
                 let write_code = pipe_ioctl_write(write_pipe);
-                let mut write_output = vec![0u8; version_request.len()];
+                // AppleUsbFilter's METHOD_IN_DIRECT pipe IOCTL expects the transfer
+                // bytes in the output/MDL buffer too. netmuxd passes the same buffer
+                // for input and output; a separate zeroed output buffer silently
+                // sends zero bytes instead of the USBMUX frame.
+                let mut write_buffer = version_request;
+                let write_len = write_buffer.len() as u32;
+                let write_ptr = write_buffer.as_mut_ptr();
                 let written = unsafe {
-                    ioctl(handle, write_code, version_request.as_ptr() as *const c_void, version_request.len() as u32,
-                        write_output.as_mut_ptr() as *mut c_void, write_output.len() as u32)
+                    ioctl(handle, write_code, write_ptr as *const c_void, write_len,
+                        write_ptr as *mut c_void, write_len)
                 }.map_err(|e| format!("Apple MUX bulk write (pipe {write_pipe}, IOCTL 0x{write_code:08X}) failed: {e}"))?;
-                if written != version_request.len() as u32 {
-                    return Err(format!("USBMUX VERSION request short write: {written}/{}", version_request.len()));
+                if written != write_len {
+                    return Err(format!("USBMUX VERSION request short write: {written}/{write_len}"));
                 }
 
                 let read_code = pipe_ioctl_read(read_pipe);
