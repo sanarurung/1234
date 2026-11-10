@@ -82,6 +82,7 @@ ipcMain.handle("app:get-status", async () => ({
   backendError
 }));
 ipcMain.handle("usb:list", async () => sendBackendCommand("usb:list"));
+ipcMain.handle("usb:inspect", async () => sendBackendCommand("usb:inspect"));
 
 app.whenReady().then(() => {
   startBackend();
