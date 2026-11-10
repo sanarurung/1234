@@ -588,7 +588,7 @@ fn lockdown_send_receive<S: std::io::Read + std::io::Write>(stream: &mut S, requ
     plist::from_reader(std::io::Cursor::new(response_payload)).map_err(|e| format!("Lockdown response plist parse failed: {e}"))
 }
 
-fn lockdown_get_value(stream: &mut std::net::TcpStream, key: &str) -> Result<plist::Value, String> {
+fn lockdown_get_value<S: std::io::Read + std::io::Write>(stream: &mut S, key: &str) -> Result<plist::Value, String> {
     let mut request = plist::Dictionary::new();
     request.insert("Label".into(), plist::Value::String("DiPlay Windows".into()));
     request.insert("Request".into(), plist::Value::String("GetValue".into()));
