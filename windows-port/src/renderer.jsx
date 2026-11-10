@@ -21,6 +21,8 @@ function App() {
   const [requestingPairing, setRequestingPairing] = useState(false);
   const [pairValidation, setPairValidation] = useState(null);
   const [validatingPair, setValidatingPair] = useState(false);
+  const [sessionResult, setSessionResult] = useState(null);
+  const [startingSession, setStartingSession] = useState(false);
 
   const refreshStatus = useCallback(() => {
     window.diPlay.getStatus().then(setStatus).catch((err) => setError(String(err)));
@@ -116,6 +118,21 @@ function App() {
     }
   };
 
+
+  const startLockdownSession = async () => {
+    setStartingSession(true);
+    setError("");
+    try {
+      const result = await window.diPlay.startLockdownSession();
+      if (result.status !== "ok") throw new Error(result.message || "StartSession에 실패했습니다.");
+      setSessionResult(result.devices);
+    } catch (err) {
+      setError(err.message || String(err));
+    } finally {
+      setStartingSession(false);
+    }
+  };
+
   const validatePairing = async () => {
     setValidatingPair(true);
     setError("");
@@ -203,16 +220,17 @@ function App() {
       <button className="scan-button" onClick={requestPairing} disabled={requestingPairing || status?.backend !== "ready"}>{requestingPairing ? "Pair 요청 중..." : "iPhone 신뢰 요청 보내기"}</button>
     </section>
     <section className="panel scan-panel">
-      <div><div className="panel-label">LOCKDOWN VALIDATE PAIR</div><div className="state">PairRecord + HostID를 iPhone에 제시해 신뢰 상태 확인</div></div>
-      <button className="scan-button" onClick={validatePairing} disabled={validatingPair || status?.backend !== "ready"}>{validatingPair ? "신뢰 상태 확인 중..." : "ValidatePair 신뢰 확인"}</button>
+      <div><div className="panel-label">LOCKDOWN START SESSION</div><div className="state">iOS 7 이상은 ValidatePair 대신 StartSession으로 세션을 시작합니다. TLS가 요청되면 Host 인증서로 핸드셰이크합니다.</div></div>
+      <button className="scan-button" onClick={startLockdownSession} disabled={startingSession || status?.backend !== "ready"}>{startingSession ? "세션 시작 중..." : "Lockdown 세션 시작"}</button>
     </section>
-    {pairValidation && <section className="results">
-      <div className="results-heading"><h2>ValidatePair 결과</h2><span>{pairValidation.validated ? "검증 성공" : "확인 필요"}</span></div>
+
+    {sessionResult && <section className="results">
+      <div className="results-heading"><h2>Lockdown 세션 결과</h2><span>{sessionResult.tls_established ? "TLS 연결 성공" : "세션 연결 성공"}</span></div>
       <article className="device"><div className="device-info">
-        <strong>DeviceID: {pairValidation.device_id} · {pairValidation.unique_device_id}</strong>
-        <span>{pairValidation.message}</span>
-        <small>EscrowBag: {pairValidation.escrow_bag_bytes} bytes</small>
-        <small>{pairValidation.response_preview}</small>
+        <strong>DeviceID: {sessionResult.device_id} · {sessionResult.device_name}</strong>
+        <span>{sessionResult.message}</span>
+        <small>SessionID: {sessionResult.session_id}</small>
+        <small>EnableSessionSSL: {String(sessionResult.ssl_enabled)} · TLS established: {String(sessionResult.tls_established)}</small>
       </div></article>
     </section>}
     {pairingRequest && <section className="results">
