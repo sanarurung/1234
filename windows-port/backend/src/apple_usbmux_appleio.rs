@@ -253,6 +253,7 @@ mod platform {
                 version_request[0..4].copy_from_slice(&USBMUX_VERSION.to_be_bytes());
                 version_request[4..8].copy_from_slice(&(USBMUX_VERSION_REQUEST_SIZE as u32).to_be_bytes());
                 version_request[8..12].copy_from_slice(&2u32.to_be_bytes());
+                version_request[16..20].copy_from_slice(&[0x49, 0x28, 0x73, 0x00]);
 
                 let read_code = pipe_ioctl_read(read_pipe);
                 let write_code = pipe_ioctl_write(write_pipe);
