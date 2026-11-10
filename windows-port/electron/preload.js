@@ -6,5 +6,6 @@ contextBridge.exposeInMainWorld("diPlay", {
   inspectUsb: () => ipcRenderer.invoke("usb:inspect"),
   probeUsbmux: () => ipcRenderer.invoke("usbmux:probe"),
   queryLockdownType: () => ipcRenderer.invoke("lockdown:query-type"),
+  preparePairing: () => ipcRenderer.invoke("pairing:prepare"),
   pairingPreflight: () => ipcRenderer.invoke("lockdown:pairing-preflight")
 });
