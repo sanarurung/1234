@@ -1,0 +1,20 @@
+* { box-sizing: border-box; }
+:root { font-family: Inter, "Segoe UI", sans-serif; color: #eef2f8; background: #10131a; font-synthesis: none; }
+body { margin: 0; min-width: 900px; min-height: 100vh; }
+.shell { max-width: 1180px; margin: 0 auto; padding: 30px 42px; }
+.topbar { display: flex; align-items: center; gap: 14px; border-bottom: 1px solid #272d39; padding-bottom: 22px; }
+.brand-mark { width: 42px; height: 42px; display: grid; place-items: center; border-radius: 13px; background: linear-gradient(135deg,#3687ff,#6b5cff); font-weight: 800; font-size: 22px; }
+.brand-title { font-size: 17px; font-weight: 750; letter-spacing: .2px; }
+.brand-subtitle { color: #8994a7; font-size: 12px; margin-top: 3px; }
+.platform { margin-left: auto; color: #8ba9d7; border: 1px solid #34465f; border-radius: 20px; padding: 7px 11px; font-size: 10px; letter-spacing: 1.2px; }
+.hero { padding: 76px 0 48px; max-width: 760px; }
+.eyebrow, .panel-label { color: #7daeff; font-size: 11px; font-weight: 700; letter-spacing: 1.5px; }
+h1 { font-size: clamp(32px, 4vw, 48px); line-height: 1.16; letter-spacing: -1.8px; margin: 18px 0; }
+.hero p { color: #9ba6b8; font-size: 15px; line-height: 1.8; max-width: 660px; }
+.grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+.panel { min-height: 170px; padding: 22px; background: #171c26; border: 1px solid #293140; border-radius: 15px; }
+.state { display: flex; align-items: center; gap: 9px; margin-top: 24px; font-size: 15px; font-weight: 650; text-transform: capitalize; }
+.dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }.dot.muted { background: #657084; }
+.panel p { color: #8e99aa; font-size: 12px; line-height: 1.65; margin-top: 13px; }
+.footer { display: flex; justify-content: space-between; gap: 18px; flex-wrap: wrap; border-top: 1px solid #272d39; margin-top: 48px; padding-top: 18px; color: #778296; font-size: 11px; }
+.error { color: #ff8585; }
