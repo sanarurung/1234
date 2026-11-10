@@ -1121,7 +1121,7 @@ fn send_lockdown_pair_request() -> Result<PairingRequestResult, String> {
         unique_device_id: prepared.unique_device_id,
         pairing_state: "paired".into(),
         response_preview: format!("{response:?}"),
-        message: "iPhone이 Pair 요청을 성공으로 응답했습니다. 다음 단계에서 ValidatePair로 신뢰 상태를 확인할 수 있습니다.".into(),
+        message: "iPhone이 Pair 요청을 성공으로 응답했습니다. StartSession으로 암호화된 Lockdown 세션을 시작할 수 있습니다.".into(),
     })
 }
 
@@ -1376,6 +1376,210 @@ fn start_lockdown_session() -> Result<StartSessionResult, String> {
     })
 }
 
+
+
+#[derive(Serialize)]
+struct ServiceProbe {
+    identifier: String,
+    available: bool,
+    port: Option<u64>,
+    ssl_enabled: Option<bool>,
+    error: Option<String>,
+}
+
+#[derive(Serialize)]
+struct ServiceDiscoveryResult {
+    device_id: u64,
+    device_name: String,
+    product_version: Option<String>,
+    product_type: Option<String>,
+    build_version: Option<String>,
+    session_id: String,
+    tls_established: bool,
+    services: Vec<ServiceProbe>,
+    message: String,
+}
+
+fn discover_lockdown_services() -> Result<ServiceDiscoveryResult, String> {
+    use openssl::pkey::PKey;
+    use openssl::ssl::{Ssl, SslContextBuilder, SslMethod, SslStream, SslVerifyMode};
+    use openssl::x509::X509;
+    use std::net::{SocketAddr, TcpStream};
+    use std::time::Duration;
+
+    // Only probe low-impact service endpoints. We request their descriptors but
+    // deliberately do not connect to their service ports or issue service commands.
+    let candidates = [
+        "com.apple.mobile.notification_proxy",
+        "com.apple.mobile.diagnostics_relay",
+    ];
+
+    let prepared = prepare_pairing_materials()?;
+    let protected = std::fs::read(&prepared.protected_record_path)
+        .map_err(|e| format!("Cannot read protected PairRecord: {e}"))?;
+    let clear = dpapi_unprotect(&protected)?;
+    let stored: plist::Value = plist::from_reader(std::io::Cursor::new(clear))
+        .map_err(|e| format!("Cannot parse protected PairRecord: {e}"))?;
+    let record = stored.as_dictionary().ok_or("Protected PairRecord is not a dictionary")?;
+
+    let get_data = |key: &str| -> Result<Vec<u8>, String> {
+        record.get(key).and_then(|v| v.as_data()).map(|v| v.to_vec())
+            .ok_or_else(|| format!("PairRecord is missing binary field {key}"))
+    };
+    let get_string = |key: &str| -> Result<String, String> {
+        record.get(key).and_then(|v| v.as_string()).map(str::to_owned)
+            .ok_or_else(|| format!("PairRecord is missing string field {key}"))
+    };
+
+    let host_id = get_string("HostID")?;
+    let system_buid = get_string("SystemBUID")?;
+    let host_cert = X509::from_pem(&get_data("HostCertificate")?)
+        .map_err(|e| format!("Saved HostCertificate is invalid: {e}"))?;
+    let host_key = PKey::private_key_from_pem(&get_data("HostPrivateKey")?)
+        .map_err(|e| format!("Saved HostPrivateKey is invalid: {e}"))?;
+    let root_cert = X509::from_pem(&get_data("RootCertificate")?)
+        .map_err(|e| format!("Saved RootCertificate is invalid: {e}"))?;
+
+    let address: SocketAddr = "127.0.0.1:27015".parse().unwrap();
+    let mut mux = TcpStream::connect_timeout(&address, Duration::from_secs(3))
+        .map_err(|e| format!("Apple USBMUX connect failed: {e}"))?;
+    mux.set_read_timeout(Some(Duration::from_secs(15))).map_err(|e| e.to_string())?;
+    mux.set_write_timeout(Some(Duration::from_secs(8))).map_err(|e| e.to_string())?;
+    write_usbmux_plist(&mut mux, 1, make_usbmux_message("ListDevices"))?;
+    let list = read_usbmux_plist(&mut mux)?;
+    let devices = list.as_dictionary().and_then(|d| d.get("DeviceList"))
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| format!("USBMUX ListDevices response has no DeviceList: {list:?}"))?;
+    let selected = devices.iter().find(|entry| {
+        let Some(d) = entry.as_dictionary() else { return false; };
+        let Some(props) = d.get("Properties").and_then(|v| v.as_dictionary()) else { return false; };
+        props.get("ConnectionType").and_then(|v| v.as_string()) == Some("USB")
+            && props.get("SerialNumber").and_then(|v| v.as_string()) == Some(prepared.unique_device_id.as_str())
+    }).ok_or("The paired iPhone is not attached over USB")?;
+    let device_id = selected.as_dictionary().and_then(|d| d.get("DeviceID"))
+        .and_then(|v| v.as_unsigned_integer()).ok_or("USB device has no DeviceID")?;
+    drop(mux);
+
+    let mut mux = TcpStream::connect_timeout(&address, Duration::from_secs(3))
+        .map_err(|e| format!("Apple USBMUX reconnect failed: {e}"))?;
+    mux.set_read_timeout(Some(Duration::from_secs(25))).map_err(|e| e.to_string())?;
+    mux.set_write_timeout(Some(Duration::from_secs(8))).map_err(|e| e.to_string())?;
+    let mut connect = make_usbmux_message("Connect");
+    let connect_dict = connect.as_dictionary_mut().unwrap();
+    connect_dict.insert("DeviceID".into(), plist::Value::Integer(device_id.into()));
+    connect_dict.insert("PortNumber".into(), plist::Value::Integer(u16::to_be(62078).into()));
+    write_usbmux_plist(&mut mux, 2, connect)?;
+    let connected = read_usbmux_plist(&mut mux)?;
+    let connect_code = connected.as_dictionary().and_then(|d| d.get("Number"))
+        .and_then(|v| v.as_unsigned_integer())
+        .ok_or_else(|| format!("USBMUX Connect response is invalid: {connected:?}"))?;
+    if connect_code != 0 {
+        return Err(format!("USBMUX Connect to lockdownd failed: {connected:?}"));
+    }
+
+    let mut start = plist::Dictionary::new();
+    start.insert("Label".into(), plist::Value::String("DiPlay Windows".into()));
+    start.insert("Request".into(), plist::Value::String("StartSession".into()));
+    start.insert("HostID".into(), plist::Value::String(host_id));
+    start.insert("SystemBUID".into(), plist::Value::String(system_buid));
+    let response = lockdown_send_receive(&mut mux, plist::Value::Dictionary(start))?;
+    let response_dict = response.as_dictionary()
+        .ok_or_else(|| format!("StartSession response is not a dictionary: {response:?}"))?;
+    if let Some(error) = response_dict.get("Error").and_then(|v| v.as_string()) {
+        return Err(format!("Lockdown StartSession rejected the host: {error}"));
+    }
+    let session_id = response_dict.get("SessionID").and_then(|v| v.as_string())
+        .ok_or_else(|| format!("StartSession response has no SessionID: {response:?}"))?.to_string();
+    let ssl_enabled = matches!(response_dict.get("EnableSessionSSL"), Some(plist::Value::Boolean(true)));
+    if !ssl_enabled {
+        return Err("The device did not enable Lockdown session TLS; service probing stopped rather than sending service requests over an unexpected plaintext session.".into());
+    }
+
+    let mut context = SslContextBuilder::new(SslMethod::tls_client())
+        .map_err(|e| format!("TLS context creation failed: {e}"))?;
+    context.set_certificate(&host_cert).map_err(|e| format!("Cannot load HostCertificate: {e}"))?;
+    context.set_private_key(&host_key).map_err(|e| format!("Cannot load HostPrivateKey: {e}"))?;
+    context.check_private_key().map_err(|e| format!("Host certificate/key mismatch: {e}"))?;
+    context.cert_store_mut().add_cert(root_cert).map_err(|e| format!("Cannot add RootCertificate: {e}"))?;
+    context.set_verify(SslVerifyMode::PEER);
+    let context = context.build();
+    let mut ssl = Ssl::new(&context).map_err(|e| format!("TLS session creation failed: {e}"))?;
+    ssl.set_connect_state();
+    let mut tls = SslStream::new(ssl, mux).map_err(|e| format!("TLS stream creation failed: {e}"))?;
+    tls.connect().map_err(|e| format!("Lockdown TLS handshake failed: {e}"))?;
+
+    let device_name = lockdown_get_value(&mut tls, "DeviceName")?
+        .as_string().unwrap_or("iPhone".into()).to_string();
+    let product_version = lockdown_get_value(&mut tls, "ProductVersion").ok()
+        .and_then(|v| v.as_string().map(str::to_owned));
+    let product_type = lockdown_get_value(&mut tls, "ProductType").ok()
+        .and_then(|v| v.as_string().map(str::to_owned));
+    let build_version = lockdown_get_value(&mut tls, "BuildVersion").ok()
+        .and_then(|v| v.as_string().map(str::to_owned));
+
+    let mut services = Vec::new();
+    for identifier in candidates {
+        let mut request = plist::Dictionary::new();
+        request.insert("Label".into(), plist::Value::String("DiPlay Windows".into()));
+        request.insert("Request".into(), plist::Value::String("StartService".into()));
+        request.insert("Service".into(), plist::Value::String(identifier.into()));
+
+        match lockdown_send_receive(&mut tls, plist::Value::Dictionary(request)) {
+            Ok(value) => {
+                let Some(dict) = value.as_dictionary() else {
+                    services.push(ServiceProbe {
+                        identifier: identifier.into(), available: false, port: None,
+                        ssl_enabled: None, error: Some("Response was not a plist dictionary".into())
+                    });
+                    continue;
+                };
+                if let Some(error) = dict.get("Error").and_then(|v| v.as_string()) {
+                    services.push(ServiceProbe {
+                        identifier: identifier.into(), available: false, port: None,
+                        ssl_enabled: None, error: Some(error.into())
+                    });
+                    continue;
+                }
+                let port = dict.get("Port").and_then(|v| v.as_unsigned_integer());
+                let available = port.is_some_and(|p| p > 0 && p <= u16::MAX as u64);
+                services.push(ServiceProbe {
+                    identifier: identifier.into(),
+                    available,
+                    port,
+                    ssl_enabled: dict.get("EnableServiceSSL").and_then(|v| match v {
+                        plist::Value::Boolean(value) => Some(*value),
+                        _ => None,
+                    }),
+                    error: if available { None } else { Some(format!("Unexpected StartService response: {value:?}")) },
+                });
+            }
+            Err(error) => services.push(ServiceProbe {
+                identifier: identifier.into(), available: false, port: None,
+                ssl_enabled: None, error: Some(error)
+            }),
+        }
+    }
+
+    let mut stop = plist::Dictionary::new();
+    stop.insert("Label".into(), plist::Value::String("DiPlay Windows".into()));
+    stop.insert("Request".into(), plist::Value::String("StopSession".into()));
+    stop.insert("SessionID".into(), plist::Value::String(session_id.clone()));
+    let _ = lockdown_send_receive(&mut tls, plist::Value::Dictionary(stop));
+
+    Ok(ServiceDiscoveryResult {
+        device_id,
+        device_name,
+        product_version,
+        product_type,
+        build_version,
+        session_id,
+        tls_established: true,
+        services,
+        message: "암호화된 Lockdown 세션에서 제한된 저위험 서비스의 StartService 응답만 확인했습니다. 서비스 포트에 접속하거나 서비스 명령을 실행하지 않았습니다.".into(),
+    })
+}
+
+
 fn print_response<T: Serialize>(event: &'static str, status: &'static str, message: Option<String>, devices: Option<T>) {
     let response = Response { event, status, message, devices };
     if let Ok(json) = serde_json::to_string(&response) { println!("{json}"); }
@@ -1418,6 +1622,10 @@ fn main() {
             "pairing:validate" => match validate_lockdown_pairing() {
                 Ok(result) => print_response("pairing:validate", "ok", None, Some(result)),
                 Err(error) => print_response::<ValidatePairResult>("pairing:validate", "error", Some(error), None),
+            },
+            "lockdown:discover-services" => match discover_lockdown_services() {
+                Ok(result) => print_response("lockdown:discover-services", "ok", None, Some(result)),
+                Err(error) => print_response::<ServiceDiscoveryResult>("lockdown:discover-services", "error", Some(error), None),
             },
             "lockdown:start-session" => match start_lockdown_session() {
                 Ok(result) => print_response("lockdown:start-session", "ok", None, Some(result)),
