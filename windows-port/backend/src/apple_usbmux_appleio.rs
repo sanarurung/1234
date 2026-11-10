@@ -272,8 +272,8 @@ mod platform {
                     write_result?;
                     read_result
                 })?;
-                let mut reply = read_task;
-                let read = read_task.len();
+                let reply = read_task;
+                let read = reply.len();
                 let mut reply = read_task;
                 if read < 20 { return Err(format!("USBMUX VERSION reply too short: {read} bytes ({})", hex(&reply[..read]))); }
                 reply.truncate(read);
