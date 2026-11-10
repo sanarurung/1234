@@ -967,6 +967,141 @@ fn prepare_pairing_materials() -> Result<PairingMaterialResult, String> {
     })
 }
 
+
+#[derive(Serialize)]
+struct PairingRequestResult {
+    device_id: u64,
+    unique_device_id: String,
+    pairing_state: String,
+    response_preview: String,
+    message: String,
+}
+
+fn send_lockdown_pair_request() -> Result<PairingRequestResult, String> {
+    use std::net::{SocketAddr, TcpStream};
+    use std::time::Duration;
+
+    // Ensure a valid, device-matched, DPAPI-protected PairRecord exists before
+    // making the trust-changing request.
+    let prepared = prepare_pairing_materials()?;
+    let protected = std::fs::read(&prepared.protected_record_path)
+        .map_err(|e| format!("Cannot read protected PairRecord: {e}"))?;
+    let clear = dpapi_unprotect(&protected)?;
+    let stored: plist::Value = plist::from_reader(std::io::Cursor::new(clear))
+        .map_err(|e| format!("Cannot parse protected PairRecord: {e}"))?;
+    let stored_dict = stored.as_dictionary()
+        .ok_or("Protected PairRecord is not a dictionary")?;
+
+    // Only public certificates and identifiers are sent to the iPhone.
+    // HostPrivateKey and RootPrivateKey remain local and DPAPI-protected.
+    let mut pair_record = plist::Dictionary::new();
+    for key in ["DeviceCertificate", "HostCertificate", "RootCertificate"] {
+        let value = stored_dict.get(key)
+            .and_then(|v| v.as_data())
+            .ok_or_else(|| format!("PairRecord is missing binary field {key}"))?;
+        pair_record.insert(key.into(), plist::Value::Data(value.to_vec()));
+    }
+    for key in ["HostID", "SystemBUID"] {
+        let value = stored_dict.get(key)
+            .and_then(|v| v.as_string())
+            .ok_or_else(|| format!("PairRecord is missing string field {key}"))?;
+        pair_record.insert(key.into(), plist::Value::String(value.to_string()));
+    }
+
+    let address: SocketAddr = "127.0.0.1:27015".parse().unwrap();
+    let mut mux = TcpStream::connect_timeout(&address, Duration::from_secs(3))
+        .map_err(|e| format!("Apple USBMUX connect failed: {e}"))?;
+    mux.set_read_timeout(Some(Duration::from_secs(12))).map_err(|e| e.to_string())?;
+    mux.set_write_timeout(Some(Duration::from_secs(5))).map_err(|e| e.to_string())?;
+    write_usbmux_plist(&mut mux, 1, make_usbmux_message("ListDevices"))?;
+    let list = read_usbmux_plist(&mut mux)?;
+    let devices = list.as_dictionary()
+        .and_then(|d| d.get("DeviceList"))
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| format!("USBMUX ListDevices response has no DeviceList: {list:?}"))?;
+    let still_attached = devices.iter().any(|entry| {
+        let Some(dict) = entry.as_dictionary() else { return false; };
+        let Some(props) = dict.get("Properties").and_then(|v| v.as_dictionary()) else { return false; };
+        props.get("ConnectionType").and_then(|v| v.as_string()) == Some("USB")
+            && props.get("SerialNumber").and_then(|v| v.as_string()) == Some(prepared.unique_device_id.as_str())
+    });
+    if !still_attached {
+        return Err("The iPhone used to create this PairRecord is no longer attached over USB".into());
+    }
+    drop(mux);
+
+    let mut mux = TcpStream::connect_timeout(&address, Duration::from_secs(3))
+        .map_err(|e| format!("Apple USBMUX reconnect failed: {e}"))?;
+    mux.set_read_timeout(Some(Duration::from_secs(20))).map_err(|e| e.to_string())?;
+    mux.set_write_timeout(Some(Duration::from_secs(5))).map_err(|e| e.to_string())?;
+    let mut connect = make_usbmux_message("Connect");
+    let connect_dict = connect.as_dictionary_mut().unwrap();
+    connect_dict.insert("DeviceID".into(), plist::Value::Integer(prepared.device_id.into()));
+    connect_dict.insert("PortNumber".into(), plist::Value::Integer(u16::to_be(62078).into()));
+    write_usbmux_plist(&mut mux, 2, connect)?;
+    let connected = read_usbmux_plist(&mut mux)?;
+    let connect_result = connected.as_dictionary()
+        .and_then(|d| d.get("Number"))
+        .and_then(|v| v.as_unsigned_integer())
+        .ok_or_else(|| format!("USBMUX Connect response is invalid: {connected:?}"))?;
+    if connect_result != 0 {
+        return Err(format!("USBMUX Connect to lockdownd failed: {connected:?}"));
+    }
+
+    let mut request = plist::Dictionary::new();
+    request.insert("Label".into(), plist::Value::String("DiPlay Windows".into()));
+    request.insert("PairRecord".into(), plist::Value::Dictionary(pair_record));
+    request.insert("Request".into(), plist::Value::String("Pair".into()));
+    request.insert("ProtocolVersion".into(), plist::Value::String("2".into()));
+
+    let response = lockdown_send_receive(&mut mux, plist::Value::Dictionary(request))?;
+    let response_dict = response.as_dictionary()
+        .ok_or_else(|| format!("Lockdown Pair response is not a dictionary: {response:?}"))?;
+    let error = response_dict.get("Error").and_then(|v| v.as_string());
+    let response_request = response_dict.get("Request").and_then(|v| v.as_string());
+    let result = response_dict.get("Result").and_then(|v| v.as_string());
+
+    if let Some(error) = error {
+        let (state, message) = match error {
+            "PairingDialogResponsePending" => (
+                "awaiting_user_approval",
+                "iPhone에 신뢰 확인 창이 표시됐을 수 있습니다. iPhone 잠금을 해제하고 '이 컴퓨터를 신뢰'를 선택한 뒤 Pair 요청을 다시 실행하세요."
+            ),
+            "UserDeniedPairing" => (
+                "denied",
+                "iPhone에서 이 컴퓨터에 대한 신뢰를 거부했습니다. 원할 경우 기기에서 다시 연결해 신뢰 절차를 시작하세요."
+            ),
+            "PasswordProtected" => (
+                "device_locked",
+                "iPhone 잠금을 해제한 뒤 Pair 요청을 다시 실행하세요."
+            ),
+            _ => return Err(format!("Lockdown Pair rejected the request: {error}; response={response:?}")),
+        };
+        return Ok(PairingRequestResult {
+            device_id: prepared.device_id,
+            unique_device_id: prepared.unique_device_id,
+            pairing_state: state.into(),
+            response_preview: format!("{response:?}"),
+            message: message.into(),
+        });
+    }
+
+    if response_request != Some("Pair") {
+        return Err(format!("Unexpected Lockdown Pair response (Request={response_request:?}): {response:?}"));
+    }
+    if result.is_some_and(|value| value != "Success") {
+        return Err(format!("Lockdown Pair did not succeed: {response:?}"));
+    }
+
+    Ok(PairingRequestResult {
+        device_id: prepared.device_id,
+        unique_device_id: prepared.unique_device_id,
+        pairing_state: "paired".into(),
+        response_preview: format!("{response:?}"),
+        message: "iPhone이 Pair 요청을 성공으로 응답했습니다. 다음 단계에서 ValidatePair로 신뢰 상태를 확인할 수 있습니다.".into(),
+    })
+}
+
 fn print_response<T: Serialize>(event: &'static str, status: &'static str, message: Option<String>, devices: Option<T>) {
     let response = Response { event, status, message, devices };
     if let Ok(json) = serde_json::to_string(&response) { println!("{json}"); }
@@ -1001,6 +1136,10 @@ fn main() {
             "pairing:prepare" => match prepare_pairing_materials() {
                 Ok(result) => print_response("pairing:prepare", "ok", None, Some(result)),
                 Err(error) => print_response::<PairingMaterialResult>("pairing:prepare", "error", Some(error), None),
+            },
+            "pairing:pair" => match send_lockdown_pair_request() {
+                Ok(result) => print_response("pairing:pair", "ok", None, Some(result)),
+                Err(error) => print_response::<PairingRequestResult>("pairing:pair", "error", Some(error), None),
             },
             _ => print_response::<Vec<Device>>("error", "unknown-command", Some("Unknown command".to_string()), None),
         }
