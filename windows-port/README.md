@@ -6,18 +6,29 @@ Windows 11 port workspace. The Android project remains untouched.
 - React + Vite renderer
 - Electron main/preload
 - Rust sidecar backend (JSON Lines over stdin/stdout)
+- Windows SetupAPI for read-only USB Plug and Play enumeration
 
 ## Prerequisites
-- Node.js 20+
-- Rust stable toolchain
 - Windows 11
+- Node.js 20+
+- Rust stable toolchain (Cargo must be available in PATH)
 
 ## Development
-Run `npm install` then `npm run dev` in this directory.
+From this directory, run:
 
-The first milestone is USB device discovery and safe device metadata display. No CarPlay, Lockdown, iAP2, or MFi authentication is implemented yet.
+```powershell
+npm install
+npm run dev
+```
+
+Electron starts the Rust backend with Cargo automatically. The first USB scan lists currently present USB Plug and Play devices that expose VID/PID hardware IDs. It does not open the USB interfaces, change drivers, or perform CarPlay authentication.
 
 ## Backend
-Build the Rust sidecar separately with `cd backend; cargo build`.
+Build the Rust sidecar manually with:
 
-The Electron main process currently reports backend status as a scaffold. USB access will be implemented only after selecting and validating the Windows USB transport and driver strategy.
+```powershell
+cd backend
+cargo build
+```
+
+This milestone only inventories USB device metadata. USBMUX, Lockdown, iAP2, MFi, NCM, and AirPlay are not implemented yet. The next milestone must validate which iPhone USB interfaces Windows exposes and which driver owns them before attempting transport I/O.
