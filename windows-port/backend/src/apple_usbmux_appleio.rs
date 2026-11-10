@@ -278,7 +278,7 @@ mod platform {
                 let deadline = std::time::Instant::now() + std::time::Duration::from_millis(HANDSHAKE_TIMEOUT_MS as u64);
                 let mut buffered = Vec::<u8>::new();
                 let mut stale_frames = 0usize;
-                let (reply, version) = loop {
+                let (reply, version) = 'handshake: loop {
                     while buffered.len() >= USBMUX_HEADER_SIZE {
                         let protocol = u32::from_be_bytes(buffered[0..4].try_into().unwrap());
                         let frame_len = u32::from_be_bytes(buffered[4..8].try_into().unwrap()) as usize;
@@ -289,7 +289,7 @@ mod platform {
                         if buffered.len() < frame_len { break; }
                         let frame: Vec<u8> = buffered.drain(..frame_len).collect();
                         if protocol == USBMUX_VERSION && frame_len == USBMUX_VERSION_REQUEST_SIZE && word8 == 2 {
-                            break (frame, word8);
+                            break 'handshake (frame, word8);
                         }
                         if protocol == 6 && stale_frames < MAX_STALE_HANDSHAKE_FRAMES {
                             stale_frames += 1;
