@@ -1699,6 +1699,10 @@ fn main() {
                 Ok(result) => print_response("usb:inspect", "ok", None, Some(result)),
                 Err(error) => print_response::<InspectionResult>("usb:inspect", "error", Some(error), None),
             },
+            "apple-mux:mode-diagnostic" => match apple_mux::read_mode_diagnostic() {
+                Ok(result) => print_response("apple-mux:mode-diagnostic", "ok", None, Some(result)),
+                Err(error) => print_response::<apple_mux::AppleMuxModeDiagnosticResult>("apple-mux:mode-diagnostic", "error", Some(error), None),
+            },
             "apple-mux:descriptor" => match apple_mux::read_descriptor() {
                 Ok(result) => print_response("apple-mux:descriptor", "ok", None, Some(result)),
                 Err(error) => print_response::<apple_mux::AppleMuxDescriptorResult>("apple-mux:descriptor", "error", Some(error), None),
