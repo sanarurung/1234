@@ -767,7 +767,9 @@ fn prepare_pairing_materials() -> Result<PairingMaterialResult, String> {
     let root_name = root_name_builder.build();
     let mut root_builder = X509::builder().map_err(|e| e.to_string())?;
     root_builder.set_version(2).map_err(|e| e.to_string())?;
-    root_builder.set_serial_number(&Asn1Integer::from_bn(&BigNum::from_u32(1).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+    let root_serial_bn = BigNum::from_u32(1).map_err(|e| e.to_string())?;
+    let root_serial = Asn1Integer::from_bn(&root_serial_bn).map_err(|e| e.to_string())?;
+    root_builder.set_serial_number(&root_serial).map_err(|e| e.to_string())?;
     root_builder.set_subject_name(&root_name).map_err(|e| e.to_string())?;
     root_builder.set_issuer_name(&root_name).map_err(|e| e.to_string())?;
     root_builder.set_pubkey(&root_key).map_err(|e| e.to_string())?;
@@ -783,7 +785,9 @@ fn prepare_pairing_materials() -> Result<PairingMaterialResult, String> {
     let host_name = host_name_builder.build();
     let mut host_builder = X509::builder().map_err(|e| e.to_string())?;
     host_builder.set_version(2).map_err(|e| e.to_string())?;
-    host_builder.set_serial_number(&Asn1Integer::from_bn(&BigNum::from_u32(1).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+    let host_serial_bn = BigNum::from_u32(1).map_err(|e| e.to_string())?;
+    let host_serial = Asn1Integer::from_bn(&host_serial_bn).map_err(|e| e.to_string())?;
+    host_builder.set_serial_number(&host_serial).map_err(|e| e.to_string())?;
     host_builder.set_subject_name(&host_name).map_err(|e| e.to_string())?;
     host_builder.set_issuer_name(root_cert.subject_name()).map_err(|e| e.to_string())?;
     host_builder.set_pubkey(&host_key).map_err(|e| e.to_string())?;
@@ -799,7 +803,9 @@ fn prepare_pairing_materials() -> Result<PairingMaterialResult, String> {
     let device_name = device_name_builder.build();
     let mut device_builder = X509::builder().map_err(|e| e.to_string())?;
     device_builder.set_version(2).map_err(|e| e.to_string())?;
-    device_builder.set_serial_number(&Asn1Integer::from_bn(&BigNum::from_u32(0).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+    let device_serial_bn = BigNum::from_u32(0).map_err(|e| e.to_string())?;
+    let device_serial = Asn1Integer::from_bn(&device_serial_bn).map_err(|e| e.to_string())?;
+    device_builder.set_serial_number(&device_serial).map_err(|e| e.to_string())?;
     device_builder.set_subject_name(&device_name).map_err(|e| e.to_string())?;
     device_builder.set_issuer_name(root_cert.subject_name()).map_err(|e| e.to_string())?;
     device_builder.set_pubkey(&device_public_key).map_err(|e| e.to_string())?;
