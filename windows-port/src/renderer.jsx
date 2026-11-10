@@ -48,6 +48,7 @@ function App() {
       <div><div className="panel-label">USB DEVICE DISCOVERY</div><div className="state"><span className={"dot " + (status?.backend === "ready" ? "live" : "muted")} /> Rust backend: {status?.backend || "checking"}</div></div>
       <button className="scan-button" onClick={scanUsb} disabled={loading || status?.backend !== "ready"}>{loading ? "검색 중..." : "USB 장치 검색"}</button>
     </section>
+    {status?.backendError && <div className="error-box">Rust backend: {status.backendError}</div>}
     {error && <div className="error-box">{error}</div>}
     <section className="results">
       <div className="results-heading"><h2>검색 결과</h2><span>{devices.length}개 장치</span></div>
