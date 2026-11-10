@@ -7,10 +7,26 @@ function App() {
   const [devices, setDevices] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [inspection, setInspection] = useState(null);
+  const [inspecting, setInspecting] = useState(false);
 
   const refreshStatus = useCallback(() => {
     window.diPlay.getStatus().then(setStatus).catch((err) => setError(String(err)));
   }, []);
+
+  const inspectUsb = async () => {
+    setInspecting(true);
+    setError("");
+    try {
+      const result = await window.diPlay.inspectUsb();
+      if (result.status !== "ok") throw new Error(result.message || "WinUSB 조회에 실패했습니다.");
+      setInspection(result.devices);
+    } catch (err) {
+      setError(err.message || String(err));
+    } finally {
+      setInspecting(false);
+    }
+  };
 
   const scanUsb = async () => {
     setLoading(true);
@@ -50,6 +66,19 @@ function App() {
     </section>
     {status?.backendError && <div className="error-box">Rust backend: {status.backendError}</div>}
     {error && <div className="error-box">{error}</div>}
+    <section className="panel scan-panel">
+      <div><div className="panel-label">APPLE USBMUX INTERFACE</div><div className="state">WinUSB Descriptor / Endpoint 조회 · 읽기 전용</div></div>
+      <button className="scan-button" onClick={inspectUsb} disabled={inspecting || status?.backend !== "ready"}>{inspecting ? "조회 중..." : "iPhone 인터페이스 분석"}</button>
+    </section>
+    {inspection && <section className="results">
+      <div className="results-heading"><h2>WinUSB 분석 결과</h2><span>{inspection.interfaces.length}개 인터페이스</span></div>
+      {inspection.interfaces.map((item, index) => <article className="device" key={index}>
+        <div className="device-icon">IF</div>
+        <div className="device-info"><strong>Interface {item.interface_number} · Alternate {item.alternate_setting}</strong><span>Class {item.interface_class} / Subclass {item.interface_subclass} / Protocol {item.interface_protocol} · Endpoint {item.endpoint_count}개</span>
+          {item.endpoints.map((ep) => <small key={ep.index}>EP {ep.address} · {ep.direction} · {ep.transfer_type} · Max packet {ep.max_packet_size} · Interval {ep.interval}</small>)}
+        </div>
+      </article>)}
+    </section>}
     <section className="results">
       <div className="results-heading"><h2>검색 결과</h2><span>{devices.length}개 장치</span></div>
       {devices.length === 0 ? <div className="empty">아직 검색 결과가 없습니다. iPhone을 연결한 뒤 USB 장치 검색을 눌러 보세요.</div> :
