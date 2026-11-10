@@ -261,16 +261,18 @@ mod platform {
                     let write_result = unsafe {
                         ioctl(handle, write_code, write_ptr as *const c_void, write_len,
                             write_ptr as *mut c_void, write_len)
-                    }.map_err(|e| format!("Apple MUX bulk write (pipe {write_pipe}, endpoint 0x{ep_write:02X}, IOCTL 0x{write_code:08X}) failed: {e}"))
-                      .and_then(|written| {
-                          if written == write_len { Ok(()) }
-                          else { Err(format!("USBMUX VERSION request short write: {written}/{write_len}")) }
-                      });
+                    }.map_err(|e| format!("Apple MUX bulk write (pipe {write_pipe}, endpoint 0x{ep_write:02X}, IOCTL 0x{write_code:08X}) failed: {e}"));
 
                     let read_result = pending_read.join()
                         .map_err(|_| "Apple MUX reader thread panicked".to_string())?;
-                    write_result?;
-                    read_result
+                    let written = write_result?;
+                    if written != write_len {
+                        return Err(format!("USBMUX VERSION request short write: {written}/{write_len}"));
+                    }
+                    read_result.map_err(|e| format!(
+                        "{e}; VERSION OUT completed {written}/{write_len} bytes on pipe {write_pipe} endpoint 0x{ep_write:02X} (max packet {write_packet}); IN pipe {read_pipe} endpoint 0x{ep_read:02X} (max packet {})",
+                        if read_pipe == 1 { mp1 } else { mp2 }
+                    ))
                 })?;
                 let mut reply = read_task;
                 let read = reply.len();
