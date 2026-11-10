@@ -1,4 +1,5 @@
 mod apple_mux;
+mod apple_usbmux;
 
 use serde::Serialize;
 use std::io::{self, BufRead, Write};
@@ -1704,6 +1705,10 @@ fn main() {
             "apple-mux:request-carplay-mode" => match apple_mux::request_carplay_mode() {
                 Ok(result) => print_response("apple-mux:request-carplay-mode", "ok", None, Some(result)),
                 Err(error) => print_response::<apple_mux::AppleMuxModeRequestResult>("apple-mux:request-carplay-mode", "error", Some(error), None),
+            },
+            "apple-usbmux:handshake" => match apple_usbmux::handshake() {
+                Ok(result) => print_response("apple-usbmux:handshake", "ok", None, Some(result)),
+                Err(error) => print_response::<apple_usbmux::UsbMuxHandshakeResult>("apple-usbmux:handshake", "error", Some(error), None),
             },
             "usbmux:probe" => match probe_usbmux() {
                 Ok(result) => print_response("usbmux:probe", "ok", None, Some(result)),
