@@ -33,9 +33,18 @@ pub struct AppleMuxModeDiagnosticResult {
     pub message: String,
 }
 
+#[derive(Serialize)]
+pub struct AppleMuxSetConfigurationResult {
+    pub interface_path: String,
+    pub requested_configuration: u8,
+    pub set_configuration_bytes: u32,
+    pub active_configuration_after: Option<u8>,
+    pub message: String,
+}
+
 #[cfg(windows)]
 mod platform {
-    use super::{AppleMuxDescriptorResult, AppleMuxModeDiagnosticResult, AppleMuxModeRequestResult};
+    use super::{AppleMuxDescriptorResult, AppleMuxModeDiagnosticResult, AppleMuxModeRequestResult, AppleMuxSetConfigurationResult};
     use std::{ffi::c_void, mem, ptr};
     use windows_sys::core::GUID;
     use windows_sys::Win32::{
@@ -192,6 +201,60 @@ mod platform {
         result
     }
 
+    // Standard USB SET_CONFIGURATION (host-to-device, device recipient).
+    // Keep this separate from control_in because the request has no data stage.
+    fn control_out_no_data(handle: HANDLE, request: u8, value: u16, index: u16) -> Result<u32, String> {
+        let packet = [
+            0x00, request,
+            value as u8, (value >> 8) as u8,
+            index as u8, (index >> 8) as u8,
+            0x00, 0x00,
+        ];
+        let mut output = [0u8; 8];
+        let mut returned = 0u32;
+        let ok = unsafe {
+            DeviceIoControl(
+                handle, APPLE_CONTROL_IOCTL,
+                packet.as_ptr() as *const c_void, packet.len() as u32,
+                output.as_mut_ptr() as *mut c_void, output.len() as u32,
+                &mut returned, ptr::null_mut(),
+            )
+        };
+        if ok == 0 {
+            return Err(format!("USB SET_CONFIGURATION({value}) failed (Win32 {})", unsafe { GetLastError() }));
+        }
+        Ok(returned)
+    }
+
+    pub fn set_configuration(value: u8) -> Result<AppleMuxSetConfigurationResult, String> {
+        if value == 0 {
+            return Err("Configuration value 0 is not a valid target for this operation.".into());
+        }
+        let (handle, path) = open_apple_mux()?;
+        let result = (|| {
+            let returned = control_out_no_data(handle, 0x09, u16::from(value), 0)?;
+            // Read back immediately. Some iPhones may re-enumerate, so a failed read-back
+            // is reported as unknown rather than treating a successful IOCTL as proof.
+            let active_configuration_after = match control_in(handle, 0x80, 0x08, 0, 0, 1) {
+                Ok((bytes, count)) if count >= 9 => Some(bytes[8]),
+                _ => None,
+            };
+            Ok(AppleMuxSetConfigurationResult {
+                interface_path: path,
+                requested_configuration: value,
+                set_configuration_bytes: returned,
+                active_configuration_after,
+                message: if active_configuration_after == Some(value) {
+                    format!("SET_CONFIGURATION({value}) completed and read-back matches.")
+                } else {
+                    format!("SET_CONFIGURATION({value}) IOCTL completed, but immediate read-back did not confirm the requested value. Re-enumeration may be required.")
+                },
+            })
+        })();
+        unsafe { CloseHandle(handle); }
+        result
+    }
+
     pub fn read_descriptor() -> Result<AppleMuxDescriptorResult, String> {
         let (handle, path) = open_apple_mux()?;
         let result = (|| {
@@ -245,6 +308,13 @@ pub fn request_carplay_mode() -> Result<AppleMuxModeRequestResult, String> { pla
 #[cfg(not(windows))]
 pub fn request_carplay_mode() -> Result<AppleMuxModeRequestResult, String> {
     Err("Apple MUX1 control transfers are supported on Windows only.".into())
+}
+
+#[cfg(windows)]
+pub fn set_configuration(value: u8) -> Result<AppleMuxSetConfigurationResult, String> { platform::set_configuration(value) }
+#[cfg(not(windows))]
+pub fn set_configuration(_value: u8) -> Result<AppleMuxSetConfigurationResult, String> {
+    Err("USB configuration changes are supported on Windows only.".into())
 }
 
 #[cfg(windows)]
