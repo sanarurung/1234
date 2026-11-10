@@ -691,7 +691,8 @@ fn dpapi_protect(_input: &[u8]) -> Result<Vec<u8>, String> {
 }
 
 fn prepare_pairing_materials() -> Result<PairingMaterialResult, String> {
-    use openssl::asn1::Asn1Time;
+    use openssl::asn1::{Asn1Integer, Asn1Time};
+    use openssl::bn::BigNum;
     use openssl::hash::MessageDigest;
     use openssl::pkey::{PKey, Private};
     use openssl::rsa::Rsa;
@@ -744,8 +745,14 @@ fn prepare_pairing_materials() -> Result<PairingMaterialResult, String> {
     let device_public_key_value = lockdown_get_value(&mut mux, "DevicePublicKey")?;
     let device_public_key_pem = device_public_key_value.as_data().ok_or("DevicePublicKey is not plist data")?;
     // lockdownd exposes DevicePublicKey as PEM (libimobiledevice parses it with PEM_read_bio_PUBKEY).
-    let device_public_key = PKey::public_key_from_pem(device_public_key_pem)
-        .map_err(|e| format!("Cannot parse iPhone DevicePublicKey PEM: {e}"))?;
+    let device_public_key = match PKey::public_key_from_pem(device_public_key_pem) {
+        Ok(key) => key,
+        Err(spki_error) => {
+            let rsa = Rsa::public_key_from_pem(device_public_key_pem)
+                .map_err(|rsa_error| format!("Cannot parse iPhone DevicePublicKey as PUBLIC KEY ({spki_error}) or RSA PUBLIC KEY ({rsa_error})"))?;
+            PKey::from_rsa(rsa).map_err(|e| format!("Cannot wrap iPhone RSA public key: {e}"))?
+        }
+    };
 
     let rsa_root = Rsa::generate(2048).map_err(|e| format!("RSA root key generation failed: {e}"))?;
     let root_key: PKey<Private> = PKey::from_rsa(rsa_root).map_err(|e| format!("Root key conversion failed: {e}"))?;
@@ -760,6 +767,7 @@ fn prepare_pairing_materials() -> Result<PairingMaterialResult, String> {
     let root_name = root_name_builder.build();
     let mut root_builder = X509::builder().map_err(|e| e.to_string())?;
     root_builder.set_version(2).map_err(|e| e.to_string())?;
+    root_builder.set_serial_number(&Asn1Integer::from_bn(&BigNum::from_u32(1).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
     root_builder.set_subject_name(&root_name).map_err(|e| e.to_string())?;
     root_builder.set_issuer_name(&root_name).map_err(|e| e.to_string())?;
     root_builder.set_pubkey(&root_key).map_err(|e| e.to_string())?;
@@ -775,6 +783,7 @@ fn prepare_pairing_materials() -> Result<PairingMaterialResult, String> {
     let host_name = host_name_builder.build();
     let mut host_builder = X509::builder().map_err(|e| e.to_string())?;
     host_builder.set_version(2).map_err(|e| e.to_string())?;
+    host_builder.set_serial_number(&Asn1Integer::from_bn(&BigNum::from_u32(1).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
     host_builder.set_subject_name(&host_name).map_err(|e| e.to_string())?;
     host_builder.set_issuer_name(root_cert.subject_name()).map_err(|e| e.to_string())?;
     host_builder.set_pubkey(&host_key).map_err(|e| e.to_string())?;
@@ -790,6 +799,7 @@ fn prepare_pairing_materials() -> Result<PairingMaterialResult, String> {
     let device_name = device_name_builder.build();
     let mut device_builder = X509::builder().map_err(|e| e.to_string())?;
     device_builder.set_version(2).map_err(|e| e.to_string())?;
+    device_builder.set_serial_number(&Asn1Integer::from_bn(&BigNum::from_u32(0).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
     device_builder.set_subject_name(&device_name).map_err(|e| e.to_string())?;
     device_builder.set_issuer_name(root_cert.subject_name()).map_err(|e| e.to_string())?;
     device_builder.set_pubkey(&device_public_key).map_err(|e| e.to_string())?;
