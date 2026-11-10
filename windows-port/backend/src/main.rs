@@ -212,6 +212,8 @@ fn inspect_winusb_interfaces() -> Result<InspectionResult, String> {
     }
 
     let mut inspections = Vec::new();
+    let mut diagnostics = Vec::new();
+    let mut interface_paths_found = 0u32;
     let mut index = 0u32;
     loop {
         let mut interface_data: SP_DEVICE_INTERFACE_DATA = unsafe { std::mem::zeroed() };
@@ -227,7 +229,10 @@ fn inspect_winusb_interfaces() -> Result<InspectionResult, String> {
 
         let mut required = 0u32;
         unsafe { SetupDiGetDeviceInterfaceDetailW(set, &interface_data, std::ptr::null_mut(), 0, &mut required, std::ptr::null_mut()); }
-        if required < 6 { continue; }
+        if required < 6 {
+            diagnostics.push(format!("Interface #{index}: invalid detail buffer size ({required})"));
+            continue;
+        }
         let mut detail = vec![0u8; required as usize];
         // SP_DEVICE_INTERFACE_DETAIL_DATA_W.cbSize is 8 on 64-bit Windows and 6 on 32-bit Windows.
         let cb_size: u32 = if cfg!(target_pointer_width = "64") { 8 } else { 6 };
@@ -238,7 +243,11 @@ fn inspect_winusb_interfaces() -> Result<InspectionResult, String> {
                 required, std::ptr::null_mut(), std::ptr::null_mut()
             )
         };
-        if ok == 0 { continue; }
+        if ok == 0 {
+            diagnostics.push(format!("Interface #{index}: SetupDiGetDeviceInterfaceDetailW failed (Win32 error {})", unsafe { GetLastError() }));
+            continue;
+        }
+        interface_paths_found += 1;
 
         let path_words = unsafe {
             std::slice::from_raw_parts(detail.as_ptr().add(4) as *const u16, (required as usize - 4) / 2)
@@ -254,18 +263,25 @@ fn inspect_winusb_interfaces() -> Result<InspectionResult, String> {
                 OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, std::ptr::null_mut()
             )
         };
-        if device_handle == INVALID_HANDLE_VALUE { continue; }
+        if device_handle == INVALID_HANDLE_VALUE {
+            diagnostics.push(format!("Interface #{index}: CreateFileW failed (Win32 error {})", unsafe { GetLastError() }));
+            continue;
+        }
 
         let mut winusb_handle: WinUsbHandle = std::ptr::null_mut();
         let initialized = unsafe { WinUsb_Initialize(device_handle, &mut winusb_handle) };
         if initialized == 0 {
+            let error = unsafe { GetLastError() };
+            diagnostics.push(format!("Interface #{index}: WinUsb_Initialize failed (Win32 error {error})"));
             unsafe { CloseHandle(device_handle); }
             continue;
         }
 
         let mut descriptor: UsbInterfaceDescriptor = unsafe { std::mem::zeroed() };
         let queried = unsafe { WinUsb_QueryInterfaceSettings(winusb_handle, 0, &mut descriptor) };
-        if queried != 0 {
+        if queried == 0 {
+            diagnostics.push(format!("Interface #{index}: WinUsb_QueryInterfaceSettings(alt=0) failed (Win32 error {})", unsafe { GetLastError() }));
+        } else {
             let mut endpoints = Vec::new();
             for pipe_index in 0..descriptor.endpoint_count {
                 let mut pipe: WinUsbPipeInformation = unsafe { std::mem::zeroed() };
@@ -307,9 +323,12 @@ fn inspect_winusb_interfaces() -> Result<InspectionResult, String> {
 
     unsafe { SetupDiDestroyDeviceInfoList(set); }
     if inspections.is_empty() {
-        return Err("Apple USBMUX WinUSB 인터페이스 경로는 찾았지만 열기 또는 Descriptor 조회에 실패했거나, 현재 연결된 인터페이스가 없습니다.".to_string());
+        if interface_paths_found == 0 {
+            return Err(format!("Apple USBMUX GUID에 해당하는 장치 인터페이스 경로를 찾지 못했습니다. SetupDiEnumDeviceInterfaces 검색 결과가 0개입니다. GUID 등록 상태와 iPhone 연결 상태를 확인하세요. {}", diagnostics.join(" | ")));
+        }
+        return Err(format!("GUID 인터페이스 경로 {interface_paths_found}개를 찾았지만 WinUSB 조회에 성공하지 못했습니다. {}", diagnostics.join(" | ")));
     }
-    Ok(InspectionResult { interface_path_found: true, interfaces: inspections })
+    Ok(InspectionResult { interface_path_found: interface_paths_found > 0, interfaces: inspections })
 }
 
 #[cfg(not(windows))]
