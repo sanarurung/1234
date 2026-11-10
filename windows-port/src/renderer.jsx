@@ -11,6 +11,8 @@ function App() {
   const [inspecting, setInspecting] = useState(false);
   const [usbmuxResult, setUsbmuxResult] = useState(null);
   const [probingMux, setProbingMux] = useState(false);
+  const [lockdownResult, setLockdownResult] = useState(null);
+  const [queryingLockdown, setQueryingLockdown] = useState(false);
 
   const refreshStatus = useCallback(() => {
     window.diPlay.getStatus().then(setStatus).catch((err) => setError(String(err)));
@@ -41,6 +43,20 @@ function App() {
       setError(err.message || String(err));
     } finally {
       setProbingMux(false);
+    }
+  };
+
+  const queryLockdown = async () => {
+    setQueryingLockdown(true);
+    setError("");
+    try {
+      const result = await window.diPlay.queryLockdownType();
+      if (result.status !== "ok") throw new Error(result.message || "Lockdown 연결에 실패했습니다.");
+      setLockdownResult(result.devices);
+    } catch (err) {
+      setError(err.message || String(err));
+    } finally {
+      setQueryingLockdown(false);
     }
   };
 
@@ -90,6 +106,18 @@ function App() {
       <div><div className="panel-label">APPLE USBMUX SERVICE</div><div className="state">127.0.0.1:27015 · ListDevices 요청</div></div>
       <button className="scan-button" onClick={probeUsbmux} disabled={probingMux || status?.backend !== "ready"}>{probingMux ? "요청 중..." : "Apple USBMUX 장치 조회"}</button>
     </section>
+    <section className="panel scan-panel">
+      <div><div className="panel-label">LOCKDOWN SERVICE</div><div className="state">USBMUX Connect → iPhone TCP 62078 → QueryType</div></div>
+      <button className="scan-button" onClick={queryLockdown} disabled={queryingLockdown || status?.backend !== "ready"}>{queryingLockdown ? "연결 확인 중..." : "Lockdown 서비스 연결 테스트"}</button>
+    </section>
+    {lockdownResult && <section className="results">
+      <div className="results-heading"><h2>Lockdown 연결 결과</h2><span>{lockdownResult.connected ? "연결 성공" : "연결 실패"}</span></div>
+      <article className="device"><div className="device-info">
+        <strong>DeviceID: {lockdownResult.device_id} · Port: {lockdownResult.port}</strong>
+        <span>Lockdown Type: {lockdownResult.lockdown_type || "응답에 Type 필드 없음"}</span>
+        <small>{lockdownResult.response_preview}</small>
+      </div></article>
+    </section>}
     {usbmuxResult && <section className="results">
       <div className="results-heading"><h2>USBMUX 응답</h2><span>{usbmuxResult.device_count ?? "확인 불가"}개 장치</span></div>
       <article className="device"><div className="device-info">
