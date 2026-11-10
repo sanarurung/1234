@@ -8,5 +8,6 @@ contextBridge.exposeInMainWorld("diPlay", {
   queryLockdownType: () => ipcRenderer.invoke("lockdown:query-type"),
   preparePairing: () => ipcRenderer.invoke("pairing:prepare"),
   requestPairing: () => ipcRenderer.invoke("pairing:pair"),
+  validatePairing: () => ipcRenderer.invoke("pairing:validate"),
   pairingPreflight: () => ipcRenderer.invoke("lockdown:pairing-preflight")
 });
