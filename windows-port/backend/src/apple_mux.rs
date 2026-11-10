@@ -35,7 +35,7 @@ pub struct AppleMuxModeDiagnosticResult {
 
 #[cfg(windows)]
 mod platform {
-    use super::{AppleMuxDescriptorResult, AppleMuxModeRequestResult};
+    use super::{AppleMuxDescriptorResult, AppleMuxModeDiagnosticResult, AppleMuxModeRequestResult};
     use std::{ffi::c_void, mem, ptr};
     use windows_sys::core::GUID;
     use windows_sys::Win32::{
