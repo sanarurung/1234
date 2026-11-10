@@ -1,5 +1,6 @@
 mod apple_mux;
 mod apple_usbmux;
+mod apple_usbmux_appleio;
 
 use serde::Serialize;
 use std::io::{self, BufRead, Write};
@@ -1709,6 +1710,10 @@ fn main() {
             "apple-usbmux:handshake" => match apple_usbmux::handshake() {
                 Ok(result) => print_response("apple-usbmux:handshake", "ok", None, Some(result)),
                 Err(error) => print_response::<apple_usbmux::UsbMuxHandshakeResult>("apple-usbmux:handshake", "error", Some(error), None),
+            },
+            "apple-usbmux:appleio-handshake" => match apple_usbmux_appleio::handshake() {
+                Ok(result) => print_response("apple-usbmux:appleio-handshake", "ok", None, Some(result)),
+                Err(error) => print_response::<apple_usbmux_appleio::AppleIoUsbMuxResult>("apple-usbmux:appleio-handshake", "error", Some(error), None),
             },
             "usbmux:probe" => match probe_usbmux() {
                 Ok(result) => print_response("usbmux:probe", "ok", None, Some(result)),
