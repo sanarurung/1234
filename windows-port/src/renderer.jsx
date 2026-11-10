@@ -321,7 +321,7 @@ function App() {
       {devices.length === 0 ? <div className="empty">아직 검색 결과가 없습니다. iPhone을 연결한 뒤 USB 장치 검색을 눌러 보세요.</div> :
         <div className="device-list">{devices.map((device, index) => <article className="device" key={device.hardware_ids.join("|") + index}>
           <div className="device-icon">USB</div>
-          <div className="device-info"><strong>{device.name}</strong><span>VID_{device.vendor_id} · PID_{device.product_id}{device.interface_number ? " · MI_" + device.interface_number : ""}</span><small>{device.hardware_ids.join(" / ")}</small></div>
+          <div className="device-info"><strong>{device.name}</strong><span>VID_{device.vendor_id} · PID_{device.product_id}{device.interface_number ? " · MI_" + device.interface_number : ""} · Class {device.device_class || "unknown"} · Service {device.driver_service || "unknown"}</span><small>{device.hardware_ids.join(" / ")}</small></div>
         </article>)}</div>}
     </section>
     <footer className="footer"><span>{status ? status.app + " · " + status.platform : "앱 상태를 불러오는 중"}</span><span>검색은 읽기 전용이며 드라이버를 변경하지 않습니다.</span></footer>
