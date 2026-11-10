@@ -264,7 +264,7 @@ fn inspect_winusb_interfaces() -> Result<InspectionResult, String> {
             )
         };
         if device_handle == INVALID_HANDLE_VALUE {
-            diagnostics.push(format!("Interface #{index}: CreateFileW failed (Win32 error {})", unsafe { GetLastError() }));
+            diagnostics.push(format!("Interface #{index}: CreateFileW failed (Win32 error {}). DevicePath={}", unsafe { GetLastError() }, device_path));
             continue;
         }
 
