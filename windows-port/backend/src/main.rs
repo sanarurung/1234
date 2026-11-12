@@ -1,5 +1,9 @@
+mod apple_mux;
+mod apple_usbmux;
+mod apple_usbmux_appleio;
+
 use serde::Serialize;
-use std::io::{self, BufRead, Write};
+use std::io::{self, BufRead, Read, Write};
 use windows_sys::Win32::Devices::DeviceAndDriverInstallation::{
     SetupDiDestroyDeviceInfoList, SetupDiEnumDeviceInfo, SetupDiGetClassDevsW,
     SetupDiGetDeviceRegistryPropertyW, SP_DEVINFO_DATA, DIGCF_ALLCLASSES, DIGCF_PRESENT,
@@ -377,7 +381,6 @@ struct UsbMuxProbeResult {
 }
 
 fn probe_usbmux() -> Result<UsbMuxProbeResult, String> {
-    use std::io::{Read, Write};
     use std::net::{SocketAddr, TcpStream};
     use std::time::Duration;
 
@@ -603,7 +606,6 @@ struct PairingPreflightResult {
 }
 
 fn lockdown_send_receive<S: std::io::Read + std::io::Write>(stream: &mut S, request: plist::Value) -> Result<plist::Value, String> {
-    use std::io::{Read, Write};
     let mut payload = Vec::new();
     plist::to_writer_xml(&mut payload, &request).map_err(|e| format!("Lockdown plist serialization failed: {e}"))?;
     let length = u32::try_from(payload.len()).map_err(|_| "Lockdown request is too large".to_string())?;
@@ -1694,6 +1696,34 @@ fn main() {
             "usb:inspect" => match inspect_winusb_interfaces() {
                 Ok(result) => print_response("usb:inspect", "ok", None, Some(result)),
                 Err(error) => print_response::<InspectionResult>("usb:inspect", "error", Some(error), None),
+            },
+            "apple-mux:set-configuration:5" => match apple_mux::set_configuration(5) {
+                Ok(result) => print_response("apple-mux:set-configuration:5", "ok", None, Some(result)),
+                Err(error) => print_response::<apple_mux::AppleMuxSetConfigurationResult>("apple-mux:set-configuration:5", "error", Some(error), None),
+            },
+            "apple-mux:set-configuration:6" => match apple_mux::set_configuration(6) {
+                Ok(result) => print_response("apple-mux:set-configuration:6", "ok", None, Some(result)),
+                Err(error) => print_response::<apple_mux::AppleMuxSetConfigurationResult>("apple-mux:set-configuration:6", "error", Some(error), None),
+            },
+            "apple-mux:mode-diagnostic" => match apple_mux::read_mode_diagnostic() {
+                Ok(result) => print_response("apple-mux:mode-diagnostic", "ok", None, Some(result)),
+                Err(error) => print_response::<apple_mux::AppleMuxModeDiagnosticResult>("apple-mux:mode-diagnostic", "error", Some(error), None),
+            },
+            "apple-mux:descriptor" => match apple_mux::read_descriptor() {
+                Ok(result) => print_response("apple-mux:descriptor", "ok", None, Some(result)),
+                Err(error) => print_response::<apple_mux::AppleMuxDescriptorResult>("apple-mux:descriptor", "error", Some(error), None),
+            },
+            "apple-mux:request-carplay-mode" => match apple_mux::request_carplay_mode() {
+                Ok(result) => print_response("apple-mux:request-carplay-mode", "ok", None, Some(result)),
+                Err(error) => print_response::<apple_mux::AppleMuxModeRequestResult>("apple-mux:request-carplay-mode", "error", Some(error), None),
+            },
+            "apple-usbmux:handshake" => match apple_usbmux::handshake() {
+                Ok(result) => print_response("apple-usbmux:handshake", "ok", None, Some(result)),
+                Err(error) => print_response::<apple_usbmux::UsbMuxHandshakeResult>("apple-usbmux:handshake", "error", Some(error), None),
+            },
+            "apple-usbmux:appleio-handshake" => match apple_usbmux_appleio::handshake() {
+                Ok(result) => print_response("apple-usbmux:appleio-handshake", "ok", None, Some(result)),
+                Err(error) => print_response::<apple_usbmux_appleio::AppleIoUsbMuxResult>("apple-usbmux:appleio-handshake", "error", Some(error), None),
             },
             "usbmux:probe" => match probe_usbmux() {
                 Ok(result) => print_response("usbmux:probe", "ok", None, Some(result)),
